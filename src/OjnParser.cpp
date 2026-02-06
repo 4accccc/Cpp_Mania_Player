@@ -111,6 +111,47 @@ std::vector<OjnDifficulty> OjnParser::getAvailableDifficulties(const std::string
     return result;
 }
 
+std::string OjnParser::extractCover(const std::string& filepath) {
+    OjnHeader header;
+    if (!getHeader(filepath, header)) {
+        return "";
+    }
+
+    // Check if cover exists
+    if (header.coverSize <= 0 || header.coverOffset <= 0) {
+        return "";
+    }
+
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file) return "";
+
+    // Seek to cover data
+    file.seekg(header.coverOffset);
+
+    // Read cover data
+    std::vector<char> coverData(header.coverSize);
+    file.read(coverData.data(), header.coverSize);
+
+    if (!file.good()) return "";
+
+    // Generate output path (same directory as OJN, with _cover.jpg suffix)
+    std::string outPath = filepath;
+    size_t dotPos = outPath.rfind('.');
+    if (dotPos != std::string::npos) {
+        outPath = outPath.substr(0, dotPos);
+    }
+    outPath += "_cover.jpg";
+
+    // Write cover to file
+    std::ofstream outFile(outPath, std::ios::binary);
+    if (!outFile) return "";
+
+    outFile.write(coverData.data(), coverData.size());
+    outFile.close();
+
+    return outPath;
+}
+
 int64_t OjnParser::measureToMs(int measure, int position, float bpm,
                                 const std::vector<std::pair<int, float>>& bpmChanges) {
     // O2Jam uses 192 ticks per measure (48 ticks per beat, 4 beats per measure)

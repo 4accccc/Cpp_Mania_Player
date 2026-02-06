@@ -10,6 +10,10 @@ Renderer::Renderer() : window(nullptr), renderer(nullptr), font(nullptr),
                        stageStartX(0), stageWidth(0), skinHitPosition(620),
                        hpBarCurrentFrame(0), hpBarLastFrameTime(0), hpBarFrameCount(0) {
     updateLaneLayout();
+    // Initialize lightingN hit times
+    for (int i = 0; i < 18; i++) {
+        lightingNHitTime[i] = -1000;  // Far in the past
+    }
 }
 
 Renderer::~Renderer() {
@@ -70,9 +74,10 @@ void Renderer::updateSkinLayout() {
 
     if (cfg && !cfg->columnWidth.empty()) {
         // Use skin config column widths
+        // Note: cfg values are already scaled by POSITION_SCALE_FACTOR (1.6) from 480 to 768 coords
         float totalWidth = 0;
         for (int i = 0; i < keyCount; i++) {
-            float w = (i < (int)cfg->columnWidth.size()) ? cfg->columnWidth[i] : 30.0f;
+            float w = (i < (int)cfg->columnWidth.size()) ? cfg->columnWidth[i] : ManiaConfig::DEFAULT_COLUMN_SIZE;
             columnWidths.push_back(w);
             totalWidth += w;
             // Add column spacing
@@ -81,8 +86,8 @@ void Renderer::updateSkinLayout() {
             }
         }
 
-        // Scale to fit screen (osu uses 640x480 virtual coords)
-        float scale = (float)windowHeight / 480.0f;
+        // Scale from 768 virtual coords to screen (values are pre-scaled from 480 to 768)
+        float scale = (float)windowHeight / 768.0f;
         stageWidth = totalWidth * scale;
         stageStartX = (windowWidth - stageWidth) / 2.0f;
 
@@ -96,22 +101,25 @@ void Renderer::updateSkinLayout() {
             }
         }
 
-        // Hit position from skin (virtual Y coordinate, scaled to screen)
-        // osu! clamps HitPosition to 240-480, default 402
-        skinHitPosition = cfg->hitPosition * scale;
+        // Hit position from skin (already scaled to 768 coords)
+        // hitPosition is distance from bottom of screen to judge line
+        skinHitPosition = (float)windowHeight - cfg->hitPosition * scale;
         judgeLineY = (int)skinHitPosition;
     } else {
         // Fallback to default layout
-        float scale = (float)windowHeight / 480.0f;
-        float defaultWidth = 30.0f * scale;
-        stageWidth = keyCount * defaultWidth;
+        // Use 768 coords for columnWidths (consistent with skin layout)
+        float scale768 = (float)windowHeight / 768.0f;
+        float defaultWidth768 = ManiaConfig::DEFAULT_COLUMN_SIZE;  // 48.0f in 768 coords
+        float defaultWidthScreen = defaultWidth768 * scale768;
+        stageWidth = keyCount * defaultWidthScreen;
         stageStartX = (windowWidth - stageWidth) / 2.0f;
 
         for (int i = 0; i < keyCount; i++) {
-            columnWidths.push_back(defaultWidth);
-            columnX.push_back(stageStartX + i * defaultWidth);
+            columnWidths.push_back(defaultWidth768);  // Store 768 coords
+            columnX.push_back(stageStartX + i * defaultWidthScreen);
         }
-        skinHitPosition = 402.0f * scale;
+        // hitPosition in 768 coords (480 - 402) * 1.6 = 124.8
+        skinHitPosition = (float)windowHeight - ManiaConfig::DEFAULT_HIT_POSITION * scale768;
         judgeLineY = (int)skinHitPosition;
     }
 }
@@ -121,14 +129,16 @@ float Renderer::getElementScale() const {
     // Formula: Min(columnWidthScale, heightScale)
     // Condition: skinVersion >= 2.4 or heightScale < 1.0
 
-    float heightScale = (float)windowHeight / 480.0f;
+    // Use 768 as base since skin values are pre-scaled to 768 coords
+    float heightScale = (float)windowHeight / 768.0f;
 
-    // Calculate column width scale
+    // Calculate column width scale (compare to default 48.0f which is 30*1.6)
     float totalColumnWidth = 0;
     for (int i = 0; i < keyCount; i++) {
-        totalColumnWidth += getLaneWidth(i) / heightScale;  // Get unscaled width
+        // getLaneWidth returns screen pixels, convert back to 768-coord width
+        totalColumnWidth += getLaneWidth(i) / heightScale;
     }
-    float columnWidthScale = totalColumnWidth / (30.0f * keyCount);
+    float columnWidthScale = totalColumnWidth / (ManiaConfig::DEFAULT_COLUMN_SIZE * keyCount);
 
     // Check skin version
     const ManiaConfig* cfg = skinManager ? skinManager->getManiaConfig(keyCount) : nullptr;
@@ -168,7 +178,8 @@ float Renderer::getLaneX(int lane) const {
 
 float Renderer::getLaneWidth(int lane) const {
     if (lane < (int)columnWidths.size()) {
-        float scale = (float)windowHeight / 480.0f;
+        // columnWidths are pre-scaled to 768 coords
+        float scale = (float)windowHeight / 768.0f;
         return columnWidths[lane] * scale;
     }
     return (float)laneWidth;
@@ -177,7 +188,8 @@ float Renderer::getLaneWidth(int lane) const {
 float Renderer::getColumnSpacing(int lane) const {
     const ManiaConfig* cfg = skinManager ? skinManager->getManiaConfig(keyCount) : nullptr;
     if (cfg && lane < (int)cfg->columnSpacing.size()) {
-        float scale = (float)windowHeight / 480.0f;
+        // columnSpacing is pre-scaled to 768 coords
+        float scale = (float)windowHeight / 768.0f;
         return cfg->columnSpacing[lane] * scale;
     }
     return 0.0f;
@@ -227,14 +239,14 @@ double Renderer::getBaseBeatLength(int64_t time, const std::vector<TimingPoint>&
         const auto& tp = timingPoints[i];
         if (tp.uninherited && tp.beatLength > 0) {
             // Clamp to reasonable range to prevent overflow from extreme SV maps
-            // Min: 6ms (10000 BPM), Max: 60000ms (1 BPM)
-            return std::clamp(tp.beatLength, 6.0, 60000.0);
+            // Min: 1ms (60000 BPM), Max: 10000000ms (0.006 BPM) for extreme SV maps
+            return std::clamp(tp.beatLength, 1.0, 10000000.0);
         }
     }
     return 500.0;
 }
 
-int Renderer::getNoteY(int64_t noteTime, int64_t currentTime, int scrollSpeed, double baseBPM, bool bpmScaleMode, const std::vector<TimingPoint>& timingPoints, bool ignoreSV) const {
+int Renderer::getNoteY(int64_t noteTime, int64_t currentTime, int scrollSpeed, double baseBPM, bool bpmScaleMode, const std::vector<TimingPoint>& timingPoints, bool ignoreSV, double clockRate) const {
     // osu!mania scroll speed formula from source code analysis:
     // distance = 21.0 * userSpeed * timeDiff / effectiveBeatLength
     //
@@ -249,8 +261,8 @@ int Renderer::getNoteY(int64_t noteTime, int64_t currentTime, int scrollSpeed, d
     if (bpmScaleMode) {
         userSpeed = (double)scrollSpeed;
     } else {
-        // Fixed mode: adjust by baseBPM
-        userSpeed = (double)scrollSpeed * (100.0 / std::max(baseBPM, 1.0));
+        // Fixed mode: adjust by baseBPM and clockRate to compensate DT/HT
+        userSpeed = (double)scrollSpeed * (100.0 / std::max(baseBPM * clockRate, 1.0));
     }
 
     // If ignoreSV, use simple calculation
@@ -273,7 +285,7 @@ int Renderer::getNoteY(int64_t noteTime, int64_t currentTime, int scrollSpeed, d
             const auto& tp = timingPoints[i];
             if (tp.uninherited && tp.beatLength > 0) {
                 // Clamp to reasonable range to prevent overflow from extreme SV maps
-                currentBaseBL = std::clamp(tp.beatLength, 6.0, 60000.0);
+                currentBaseBL = std::clamp(tp.beatLength, 1.0, 10000000.0);
                 break;
             }
         }
@@ -296,7 +308,7 @@ int Renderer::getNoteY(int64_t noteTime, int64_t currentTime, int scrollSpeed, d
 
     for (int i = loopStartIdx; i <= endIdx && i < (int)timingPoints.size(); i++) {
         const auto& tp = timingPoints[i];
-        if (tp.time <= t1) continue;
+        if (tp.time < t1) continue;
         if (tp.time >= t2) break;
 
         double segmentTime = tp.time - t1;
@@ -306,7 +318,7 @@ int Renderer::getNoteY(int64_t noteTime, int64_t currentTime, int scrollSpeed, d
         t1 = tp.time;
         if (tp.uninherited && tp.beatLength > 0) {
             // Clamp to reasonable range to prevent overflow from extreme SV maps
-            currentBaseBL = std::clamp(tp.beatLength, 6.0, 60000.0);
+            currentBaseBL = std::clamp(tp.beatLength, 1.0, 10000000.0);
         } else if (!tp.uninherited && tp.beatLength < 0) {
             double sv = -tp.beatLength;
             sv = std::max(10.0, std::min(10000.0, sv));
@@ -320,6 +332,52 @@ int Renderer::getNoteY(int64_t noteTime, int64_t currentTime, int scrollSpeed, d
     pixelOffset += 21.0 * userSpeed * remainingTime / std::max(effectiveBL, 1.0) * scale;
 
     return judgeLineY - NOTE_HEIGHT - static_cast<int>(pixelOffset);
+}
+
+int Renderer::getHoldHeadY(const Note& note, int naturalY, int64_t currentTime, int scrollSpeed) const {
+    int y = naturalY;
+    int judgeY = judgeLineY - NOTE_HEIGHT;
+
+    if (!note.headHit) {
+        return y;
+    }
+
+    if (note.headReleaseTime > 0) {
+        float fallSpeed = 0.6f * scrollSpeed / 18.0f;
+
+        if (note.headHitEarly) {
+            // Early hit - check if head has reached judge line yet
+            if (naturalY < judgeY) {
+                // Head hasn't reached judge line - continue natural fall
+                y = naturalY;
+            } else {
+                // Head has reached judge line - fall from judge line
+                // Head reached judge line at note.time
+                int64_t fallStartTime = std::max(note.headReleaseTime, note.time);
+                int64_t fallTime = currentTime - fallStartTime;
+                if (fallTime > 0) {
+                    y = judgeY + (int)(fallTime * fallSpeed);
+                } else {
+                    y = judgeY;
+                }
+            }
+        } else {
+            // Late hit - head was at judge line, fall from there
+            y = judgeY + (int)((currentTime - note.headReleaseTime) * fallSpeed);
+        }
+    } else if (note.state == NoteState::Holding) {
+        if (note.headHitEarly) {
+            // Early hit: let head fall naturally but stop at judge line
+            if (y > judgeY) {
+                y = judgeY;
+            }
+        } else {
+            // Late hit: pull head up to judge line
+            y = judgeY;
+        }
+    }
+
+    return y;
 }
 
 void Renderer::renderLanes() {
@@ -348,7 +406,8 @@ void Renderer::renderLanes() {
     }
 
     for (int i = 0; i <= keyCount; i++) {
-        float lineWidth = 2.0f;
+        // Default line width: 2.0f if no skin, 0 if skin loaded (skin should specify)
+        float lineWidth = cfg ? 0.0f : 2.0f;
         if (cfg && i < (int)cfg->columnLineWidth.size()) {
             lineWidth = cfg->columnLineWidth[i];
         }
@@ -434,11 +493,12 @@ void Renderer::renderStageBorders() {
 }
 
 void Renderer::renderKeys(const bool* laneKeyDown, int count) {
-    float scale = (float)windowHeight / 480.0f;
+    // Use 768 scale for skin values (pre-scaled from 480 to 768)
+    float scale = (float)windowHeight / 768.0f;
     const ManiaConfig* cfg = skinManager ? skinManager->getManiaConfig(keyCount) : nullptr;
 
-    // Get hit position (default 402)
-    float hitPos = cfg ? (float)cfg->hitPosition : 402.0f;
+    // Get hit position (already scaled to 768 coords, default is DEFAULT_HIT_POSITION)
+    float hitPos = cfg ? cfg->hitPosition : ManiaConfig::DEFAULT_HIT_POSITION;
     // KeyImage Y = hitPosition * scale (this is the vertical center, Origin=CentreLeft)
     float keyCenterY = hitPos * scale;
 
@@ -456,9 +516,13 @@ void Renderer::renderKeys(const bool* laneKeyDown, int count) {
         if (keyTex) {
             float texW, texH;
             SDL_GetTextureSize(keyTex, &texW, &texH);
-            float keyH = w * (texH / texW);  // Keep aspect ratio
+            // lazer: Width fills column, Height keeps texture original height (no scaling)
+            // For @2x textures, we need to scale down by 2
+            // But since we're stretching width to column width, we just use texH directly
+            // scaled to screen coordinates
+            float keyH = texH * scale;
 
-            // KeyImage bottom aligned to screen bottom
+            // KeyImage bottom aligned to screen bottom (Origin = BottomCentre in lazer)
             float y = (float)windowHeight - keyH;
             SDL_FRect dst = { x, y, w, keyH };
             SDL_RenderTexture(renderer, keyTex, nullptr, &dst);
@@ -471,12 +535,14 @@ void Renderer::renderHitLighting(const bool* laneKeyDown, int count) {
     if (!lightTex) return;
 
     const ManiaConfig* cfg = skinManager ? skinManager->getManiaConfig(keyCount) : nullptr;
-    float scale = (float)windowHeight / 480.0f;
+    // Use 768 scale for skin values (pre-scaled from 480 to 768)
+    float scale = (float)windowHeight / 768.0f;
 
-    // Get light position from skin config
+    // Get light position from skin config (already scaled to 768 coords)
+    // lightPosition is distance from bottom of screen
     float lightY = (float)judgeLineY;
     if (cfg && cfg->lightPosition > 0) {
-        lightY = cfg->lightPosition * scale;
+        lightY = (float)windowHeight - cfg->lightPosition * scale;
     }
 
     float texW, texH;
@@ -511,6 +577,109 @@ void Renderer::renderHitLighting(const bool* laneKeyDown, int count) {
 
     // Reset blend mode
     SDL_SetTextureBlendMode(lightTex, SDL_BLENDMODE_BLEND);
+}
+
+void Renderer::triggerLightingN(int lane, int64_t time) {
+    if (lane >= 0 && lane < 18) {
+        lightingNHitTime[lane] = time;
+    }
+}
+
+void Renderer::renderNoteLighting(const bool* laneHoldActive, int count, int64_t currentTime) {
+    if (!skinManager) return;
+
+    const ManiaConfig* cfg = skinManager->getManiaConfig(keyCount);
+    float baseScale = (float)windowHeight / 768.0f;
+
+    // Lighting position is at judge line (HitPosition)
+    float lightY = (float)judgeLineY;
+
+    for (int i = 0; i < count && i < keyCount; i++) {
+        float x = getLaneX(i);
+        float w = getLaneWidth(i);
+        float centerX = x + w / 2.0f;
+
+        // Get column width for scale calculation (in 480 coords, default 30)
+        float columnWidth = 30.0f;
+        if (cfg && i < (int)cfg->columnWidth.size()) {
+            // columnWidth is stored scaled by 1.6, convert back to 480 coords
+            columnWidth = cfg->columnWidth[i] / ManiaConfig::POSITION_SCALE_FACTOR;
+        }
+
+        // Get light color from skin
+        SDL_Color lightColor = {255, 255, 255, 255};
+        if (cfg && i < (int)cfg->colourLight.size()) {
+            lightColor = cfg->colourLight[i];
+        }
+
+        // Check if hold is active (LightingL - loops)
+        if (laneHoldActive && laneHoldActive[i]) {
+            int frameCount = skinManager->getLightingLFrameCount(keyCount);
+            if (frameCount > 0) {
+                float frameInterval = skinManager->getLightingFrameInterval(frameCount);
+                int frame = (int)(currentTime / frameInterval) % frameCount;
+                if (frame < 0) frame = 0;
+
+                SDL_Texture* tex = skinManager->getLightingLTexture(keyCount, frame);
+                if (tex) {
+                    float texW, texH;
+                    SDL_GetTextureSize(tex, &texW, &texH);
+
+                    // Calculate scale: (LightingLWidth or ColumnWidth) / 30
+                    float lightingWidth = columnWidth;
+                    if (cfg && i < (int)cfg->holdNoteLightWidth.size() && cfg->holdNoteLightWidth[i] > 0) {
+                        lightingWidth = cfg->holdNoteLightWidth[i] / ManiaConfig::POSITION_SCALE_FACTOR;
+                    }
+                    float lightScale = (lightingWidth / 30.0f) * baseScale;
+
+                    float lightW = texW * lightScale;
+                    float lightH = texH * lightScale;
+
+                    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_ADD);
+                    SDL_SetTextureColorMod(tex, 255, 255, 255);  // LightingN/L keeps original color
+
+                    SDL_FRect dst = { centerX - lightW / 2, lightY - lightH / 2, lightW, lightH };
+                    SDL_RenderTexture(renderer, tex, nullptr, &dst);
+                    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+                }
+            }
+        }
+        // Check if LightingN animation is active (plays once, 170ms total)
+        else {
+            int64_t elapsed = currentTime - lightingNHitTime[i];
+            if (elapsed >= 0 && elapsed < 170) {
+                int frameCount = skinManager->getLightingNFrameCount(keyCount);
+                if (frameCount > 0) {
+                    float frameInterval = skinManager->getLightingFrameInterval(frameCount);
+                    int frame = (int)(elapsed / frameInterval);
+                    if (frame >= frameCount) frame = frameCount - 1;
+
+                    SDL_Texture* tex = skinManager->getLightingNTexture(keyCount, frame);
+                    if (tex) {
+                        float texW, texH;
+                        SDL_GetTextureSize(tex, &texW, &texH);
+
+                        // Calculate scale: (LightingNWidth or ColumnWidth) / 30
+                        float lightingWidth = columnWidth;
+                        if (cfg && i < (int)cfg->explosionWidth.size() && cfg->explosionWidth[i] > 0) {
+                            lightingWidth = cfg->explosionWidth[i] / ManiaConfig::POSITION_SCALE_FACTOR;
+                        }
+                        float lightScale = (lightingWidth / 30.0f) * baseScale;
+
+                        float lightW = texW * lightScale;
+                        float lightH = texH * lightScale;
+
+                        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_ADD);
+                        SDL_SetTextureColorMod(tex, 255, 255, 255);  // Keep original color
+
+                        SDL_FRect dst = { centerX - lightW / 2, lightY - lightH / 2, lightW, lightH };
+                        SDL_RenderTexture(renderer, tex, nullptr, &dst);
+                        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+                    }
+                }
+            }
+        }
+    }
 }
 
 void Renderer::renderLaneHighlights(const bool* laneKeyDown, int count, bool hiddenMod, bool fadeInMod, int combo) {
@@ -571,11 +740,12 @@ void Renderer::renderJudgeLine() {
         showLine = cfg->judgementLine;
     }
 
-    // Calculate hit position Y
+    // Calculate hit position Y (values are pre-scaled to 768 coords)
+    // hitPosition is distance from bottom of screen to judge line
     float hitY = (float)judgeLineY;
     if (cfg) {
-        float scale = (float)windowHeight / 480.0f;
-        hitY = cfg->hitPosition * scale;
+        float scale = (float)windowHeight / 768.0f;
+        hitY = (float)windowHeight - cfg->hitPosition * scale;
     }
 
     // Try to use skin stage hint texture
@@ -583,7 +753,7 @@ void Renderer::renderJudgeLine() {
     if (hintTex) {
         float texW, texH;
         SDL_GetTextureSize(hintTex, &texW, &texH);
-        float scale = (float)windowHeight / 480.0f;
+        float scale = (float)windowHeight / 768.0f;
 
         // Render hint texture across all lanes
         float x = (float)getLaneX(0);
@@ -638,7 +808,7 @@ SDL_Color Renderer::getNoteSDLColor(NoteColor color) {
     }
 }
 
-void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int scrollSpeed, double baseBPM, bool bpmScaleMode, const std::vector<TimingPoint>& timingPoints, const NoteColor* colors, bool hiddenMod, bool fadeInMod, int combo, bool ignoreSV) {
+void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int scrollSpeed, double baseBPM, bool bpmScaleMode, const std::vector<TimingPoint>& timingPoints, const NoteColor* colors, bool hiddenMod, bool fadeInMod, int combo, bool ignoreSV, double clockRate) {
     // osu!stable formula: coverHeight = Min(400, 160 + combo / 2) in 480px coordinate
     // Scale to our coordinate system (judgeLineY)
     int osuCoverHeight = std::min(400, 160 + combo / 2);
@@ -654,6 +824,28 @@ void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int sc
 
     int fadeInFadeEndY = coverHeight;
     int fadeInFadeStartY = fadeInFadeEndY - gradientHeight;
+
+    // Pre-calculate firstFakeEndTime and lastFakeEndTime to avoid O(n²) nested loops
+    const int64_t groupThreshold = 2000;
+    int64_t firstFakeEndTime = INT64_MAX;
+    int64_t lastFakeEndTime = INT64_MIN;
+    for (const auto& n : notes) {
+        if (n.isFakeNote && n.fakeNoteShouldFix) {
+            if (n.endTime < firstFakeEndTime) {
+                firstFakeEndTime = n.endTime;
+            }
+        }
+    }
+    // Find last fake note in first group
+    if (firstFakeEndTime != INT64_MAX) {
+        for (const auto& n : notes) {
+            if (n.isFakeNote && n.fakeNoteShouldFix &&
+                n.endTime <= firstFakeEndTime + groupThreshold &&
+                n.endTime > lastFakeEndTime) {
+                lastFakeEndTime = n.endTime;
+            }
+        }
+    }
 
     for (auto& note : notes) {
         // Fake notes (NaN time in SV maps) - only render tail
@@ -679,27 +871,18 @@ void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int sc
 
             // For fake notes that should be fixed (extreme SV after endTime)
             if (note.fakeNoteShouldFix) {
-                // Find the first shouldFix fake note's endTime as reference
-                int64_t firstFakeEndTime = INT64_MAX;
-                for (const auto& n : notes) {
-                    if (n.isFakeNote && n.fakeNoteShouldFix && n.endTime < firstFakeEndTime) {
-                        firstFakeEndTime = n.endTime;
-                    }
-                }
-
                 // Only treat as "fixed" if this fake note is in the first group
                 // (within 2000ms of the first fake note)
-                const int64_t groupThreshold = 2000;
                 bool isFirstGroup = (note.endTime <= firstFakeEndTime + groupThreshold);
 
                 if (!isFirstGroup) {
                     // Not in first group, treat as normal fake note (fall through to else branch)
-                    int endY = getNoteY(note.endTime, currentTime, scrollSpeed, baseBPM, bpmScaleMode, timingPoints, ignoreSV);
+                    int endY = getNoteY(note.endTime, currentTime, scrollSpeed, baseBPM, bpmScaleMode, timingPoints, ignoreSV, clockRate);
                     if (endY < -NOTE_HEIGHT * 3 || endY > windowHeight) continue;
 
                     float laneW = getLaneWidth(note.lane);
-                    float x = (float)getLaneX(note.lane) + 2;
-                    float w = laneW - 4;
+                    float x = (float)getLaneX(note.lane);
+                    float w = laneW;
 
                     SDL_Texture* tailTex = skinManager ? skinManager->getNoteTailTexture(note.lane, keyCount) : nullptr;
                     if (tailTex) {
@@ -718,16 +901,6 @@ void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int sc
                 if (note.fakeNoteHasFixedY) {
                     endY = (int)note.fakeNoteFixedY;
                 } else {
-                    // Find last fake note in first group
-                    int64_t lastFakeEndTime = firstFakeEndTime;
-                    for (const auto& n : notes) {
-                        if (n.isFakeNote && n.fakeNoteShouldFix &&
-                            n.endTime <= firstFakeEndTime + groupThreshold &&
-                            n.endTime > lastFakeEndTime) {
-                            lastFakeEndTime = n.endTime;
-                        }
-                    }
-
                     // All fake notes in first group appear together
                     const int64_t appearDuration = 500;
                     int64_t appearTime = firstFakeEndTime - appearDuration;
@@ -757,7 +930,7 @@ void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int sc
                 if (currentTime >= lastFakeEndTime) continue;
             } else {
                 // Normal fake notes: calculate position normally
-                endY = getNoteY(note.endTime, currentTime, scrollSpeed, baseBPM, bpmScaleMode, timingPoints, ignoreSV);
+                endY = getNoteY(note.endTime, currentTime, scrollSpeed, baseBPM, bpmScaleMode, timingPoints, ignoreSV, clockRate);
             }
 
             // Skip if not visible
@@ -765,8 +938,8 @@ void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int sc
 
             // Render only the tail for fake notes
             float laneW = getLaneWidth(note.lane);
-            float x = (float)getLaneX(note.lane) + 2;
-            float w = laneW - 4;
+            float x = (float)getLaneX(note.lane);
+            float w = laneW;
 
             SDL_Texture* tailTex = skinManager ? skinManager->getNoteTailTexture(note.lane, keyCount) : nullptr;
             if (tailTex) {
@@ -781,12 +954,14 @@ void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int sc
             continue;  // Skip normal rendering for fake notes
         }
 
-        int y = getNoteY(note.time, currentTime, scrollSpeed, baseBPM, bpmScaleMode, timingPoints, ignoreSV);
+        int y = getNoteY(note.time, currentTime, scrollSpeed, baseBPM, bpmScaleMode, timingPoints, ignoreSV, clockRate);
 
-        // Only clamp head to judge line if actively holding (not missed or released)
-        if ((note.state == NoteState::Holding || note.state == NoteState::Released) && !note.hadComboBreak) {
-            y = judgeLineY - NOTE_HEIGHT;
-        } else if (y > windowHeight) {
+        // Handle hold note head position based on hit timing
+        if (note.isHold) {
+            y = getHoldHeadY(note, y, currentTime, scrollSpeed);
+        }
+
+        if (y > windowHeight) {
             // For hold notes, don't skip even if head is below screen - tail may still be visible
             if (!note.isHold) {
                 continue;
@@ -817,20 +992,31 @@ void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int sc
 
         SDL_Color c = getNoteSDLColor(colors[note.lane]);
 
-        // Texture color mod: white normally, gray when missed
+        // Texture color mod: white normally, gray when missed/released
         Uint8 texMod = 255;
-        if (note.state == NoteState::Missed || note.hadComboBreak) {
+        if (note.state == NoteState::Missed) {
             texMod = 128;  // Gray for missed notes
+        } else if (note.headGrayStartTime > 0) {
+            // 60ms linear transition from white (255) to gray (128)
+            int64_t elapsed = currentTime - note.headGrayStartTime;
+            if (elapsed >= 60) {
+                texMod = 128;
+            } else if (elapsed > 0) {
+                float progress = elapsed / 60.0f;
+                texMod = (Uint8)(255 - (255 - 128) * progress);
+            }
         }
 
         float laneW = getLaneWidth(note.lane);
-        float x = (float)getLaneX(note.lane) + 2;
-        float w = laneW - 4;
+        float x = (float)getLaneX(note.lane);
+        float w = laneW;
 
         if (note.isHold && note.endTime > note.time) {
-            int endY = getNoteY(note.endTime, currentTime, scrollSpeed, baseBPM, bpmScaleMode, timingPoints, ignoreSV);
+            int endY = getNoteY(note.endTime, currentTime, scrollSpeed, baseBPM, bpmScaleMode, timingPoints, ignoreSV, clockRate);
 
+            // Skip if both head and tail are off screen (above or below)
             if (endY < -NOTE_HEIGHT && y < -NOTE_HEIGHT) continue;
+            if (y > windowHeight + 200 && endY > windowHeight + 200) continue;
 
             // Calculate tail alpha based on its position
             Uint8 tailAlpha = calcHiddenAlpha(endY);
@@ -840,7 +1026,14 @@ void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int sc
 
             // Get head texture height to calculate body bottom position
             float headH = (float)NOTE_HEIGHT;
-            SDL_Texture* headTex = skinManager ? skinManager->getNoteHeadTexture(note.lane, keyCount) : nullptr;
+            int headFrameCount = skinManager ? skinManager->getNoteHeadFrameCount(note.lane, keyCount) : 0;
+            int headFrame = 0;
+            if (headFrameCount > 1) {
+                float frameInterval = skinManager->getNoteFrameInterval(headFrameCount);
+                headFrame = (int)(currentTime / frameInterval) % headFrameCount;
+                if (headFrame < 0) headFrame = 0;
+            }
+            SDL_Texture* headTex = skinManager ? skinManager->getNoteHeadTexture(note.lane, keyCount, headFrame) : nullptr;
             if (headTex) {
                 float texW, texH;
                 SDL_GetTextureSize(headTex, &texW, &texH);
@@ -851,7 +1044,14 @@ void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int sc
 
             // Get tail texture height
             float tailH = (float)NOTE_HEIGHT;
-            SDL_Texture* tailTex = skinManager ? skinManager->getNoteTailTexture(note.lane, keyCount) : nullptr;
+            int tailFrameCount = skinManager ? skinManager->getNoteTailFrameCount(note.lane, keyCount) : 0;
+            int tailFrame = 0;
+            if (tailFrameCount > 1) {
+                float frameInterval = skinManager->getNoteFrameInterval(tailFrameCount);
+                tailFrame = (int)(currentTime / frameInterval) % tailFrameCount;
+                if (tailFrame < 0) tailFrame = 0;
+            }
+            SDL_Texture* tailTex = skinManager ? skinManager->getNoteTailTexture(note.lane, keyCount, tailFrame) : nullptr;
             if (tailTex) {
                 float texW, texH;
                 SDL_GetTextureSize(tailTex, &texW, &texH);
@@ -872,42 +1072,91 @@ void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int sc
                 int renderTop = std::max(0, fullBodyTop);
                 int renderBottom = std::min(windowHeight, fullBodyBottom);
 
+                // Apply Hidden/FadeIn hard clipping (fully invisible area)
+                if (hiddenMod) {
+                    renderBottom = std::min(renderBottom, hiddenFadeEndY);
+                }
+                if (fadeInMod) {
+                    renderTop = std::max(renderTop, fadeInFadeStartY);
+                }
+
                 // Render body if any part is visible
                 if (renderBottom > renderTop) {
-                    // Calculate texture offset for off-screen portion
-                    float srcOffsetY = (float)(renderTop - fullBodyTop);
-                    float renderHeight = (float)(renderBottom - renderTop);
+                    int bodyFrameCount = skinManager ? skinManager->getNoteBodyFrameCount(note.lane, keyCount) : 0;
+                    int bodyFrame = 0;
+                    if (bodyFrameCount > 1) {
+                        float frameInterval = skinManager->getNoteBodyFrameInterval();  // Fixed 30ms
+                        bodyFrame = (int)(currentTime / frameInterval) % bodyFrameCount;
+                        if (bodyFrame < 0) bodyFrame = 0;
+                    }
+                    SDL_Texture* bodyTex = skinManager ? skinManager->getNoteBodyTexture(note.lane, keyCount, bodyFrame) : nullptr;
 
-                    SDL_Texture* bodyTex = skinManager ? skinManager->getNoteBodyTexture(note.lane, keyCount) : nullptr;
-                    if (bodyTex) {
-                        SDL_SetTextureAlphaMod(bodyTex, 255);
-                        SDL_SetTextureColorMod(bodyTex, texMod, texMod, texMod);  // Gray when missed
-                        float texW, texH;
-                        SDL_GetTextureSize(bodyTex, &texW, &texH);
-
-                        // Calculate source rect with proper clamping
-                        float srcY = std::max(0.0f, srcOffsetY);
-                        float srcH = std::min(texH, renderHeight);
-
-                        // If srcOffsetY exceeds texture height, tile from beginning
-                        if (srcOffsetY >= texH) {
-                            srcY = fmod(srcOffsetY, texH);
-                            srcH = std::min(texH - srcY, renderHeight);
+                    // Optimization: Only use segmented rendering for Hidden/FadeIn gradient effect
+                    // Without these mods, render the entire body in one draw call
+                    if (!hiddenMod && !fadeInMod) {
+                        // Fast path: single draw call for entire body
+                        float bodyHeight = (float)(renderBottom - renderTop);
+                        if (bodyTex) {
+                            float texW, texH;
+                            SDL_GetTextureSize(bodyTex, &texW, &texH);
+                            SDL_SetTextureAlphaMod(bodyTex, 255);
+                            SDL_SetTextureColorMod(bodyTex, texMod, texMod, texMod);
+                            // Tile the texture vertically
+                            float srcOffsetY = (float)(renderTop - fullBodyTop);
+                            float remainingHeight = bodyHeight;
+                            float currentY = (float)renderTop;
+                            while (remainingHeight > 0) {
+                                float srcY = fmod(srcOffsetY, texH);
+                                float srcH = std::min(texH - srcY, remainingHeight);
+                                SDL_FRect srcRect = { 0, srcY, texW, srcH };
+                                SDL_FRect dstRect = { (float)x, currentY, (float)w, srcH };
+                                SDL_RenderTexture(renderer, bodyTex, &srcRect, &dstRect);
+                                currentY += srcH;
+                                srcOffsetY += srcH;
+                                remainingHeight -= srcH;
+                            }
+                        } else {
+                            SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, 64);
+                            SDL_FRect body = { (float)x, (float)renderTop, (float)w, bodyHeight };
+                            SDL_RenderFillRect(renderer, &body);
                         }
-
-                        SDL_FRect srcRect = { 0, srcY, texW, srcH };
-                        SDL_FRect dstRect = { (float)x, (float)renderTop, (float)w, renderHeight };
-                        SDL_RenderTexture(renderer, bodyTex, &srcRect, &dstRect);
                     } else {
-                        SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, 64);
-                        SDL_FRect body = { (float)x, (float)renderTop, (float)w, renderHeight };
-                        SDL_RenderFillRect(renderer, &body);
+                        // Slow path: segmented rendering for gradient effect
+                        const int SEGMENT_HEIGHT = 16;  // Increased from 4 to reduce draw calls
+                        for (int segY = renderTop; segY < renderBottom; segY += SEGMENT_HEIGHT) {
+                            int segBottom = std::min(segY + SEGMENT_HEIGHT, renderBottom);
+                            int segMidY = (segY + segBottom) / 2;
+                            Uint8 segAlpha = calcHiddenAlpha(segMidY);
+                            if (segAlpha == 0) continue;
+
+                            float srcOffsetY = (float)(segY - fullBodyTop);
+                            float segHeight = (float)(segBottom - segY);
+
+                            if (bodyTex) {
+                                float texW, texH;
+                                SDL_GetTextureSize(bodyTex, &texW, &texH);
+                                float srcY = fmod(srcOffsetY, texH);
+                                float srcH = std::min(texH - srcY, segHeight);
+
+                                SDL_SetTextureAlphaMod(bodyTex, segAlpha);
+                                SDL_SetTextureColorMod(bodyTex, texMod, texMod, texMod);
+                                SDL_FRect srcRect = { 0, srcY, texW, srcH };
+                                SDL_FRect dstRect = { (float)x, (float)segY, (float)w, segHeight };
+                                SDL_RenderTexture(renderer, bodyTex, &srcRect, &dstRect);
+                            } else {
+                                Uint8 bodyAlpha = (Uint8)(64 * segAlpha / 255);
+                                SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, bodyAlpha);
+                                SDL_FRect body = { (float)x, (float)segY, (float)w, segHeight };
+                                SDL_RenderFillRect(renderer, &body);
+                            }
+                        }
                     }
                 }
             }
 
             // Render tail with its own alpha (bottom aligned to body top)
-            if (endY >= -NOTE_HEIGHT * 3 && endY <= windowHeight && tailAlpha > 0) {
+            // Don't render tail if it has passed the head position (endY > y)
+            if (endY >= -NOTE_HEIGHT * 3 && endY <= windowHeight && endY <= y && tailAlpha > 0) {
                 if (tailTex) {
                     float tailY = (float)(endY + NOTE_HEIGHT) - tailH;  // Tail bottom aligns to body top
                     SDL_SetTextureAlphaMod(tailTex, tailAlpha);
@@ -933,8 +1182,19 @@ void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int sc
             bool isHoldNote = (note.endTime > note.time);
             SDL_Texture* noteTex = nullptr;
             if (skinManager) {
-                noteTex = isHoldNote ? skinManager->getNoteHeadTexture(note.lane, keyCount)
-                                     : skinManager->getNoteTexture(note.lane, keyCount);
+                // Calculate animation frame based on current time
+                int frameCount = isHoldNote
+                    ? skinManager->getNoteHeadFrameCount(note.lane, keyCount)
+                    : skinManager->getNoteFrameCount(note.lane, keyCount);
+                int frame = 0;
+                if (frameCount > 1) {
+                    float frameInterval = skinManager->getNoteFrameInterval(frameCount);
+                    frame = (int)(currentTime / frameInterval) % frameCount;
+                    if (frame < 0) frame = 0;  // Handle negative time
+                }
+                noteTex = isHoldNote
+                    ? skinManager->getNoteHeadTexture(note.lane, keyCount, frame)
+                    : skinManager->getNoteTexture(note.lane, keyCount, frame);
             }
             if (noteTex) {
                 // Get texture size to maintain aspect ratio
@@ -1044,15 +1304,16 @@ void Renderer::renderHitJudgement(int judgement, int64_t elapsedMs) {
         }
     }
 
-    float elementScale = getElementScale();
-    float finalScale = elementScale * animScale;
+    // Remove elementScale, only use animation scale
+    float finalScale = animScale;
     float w = texW * finalScale;
     float h = texH * finalScale;
     float centerX = stageX + totalWidth / 2;
 
-    // Use skin config scorePosition or default
+    // Use skin config scorePosition or default (scorePosition is pre-scaled to 768 coords)
     const ManiaConfig* cfg = skinManager ? skinManager->getManiaConfig(keyCount) : nullptr;
-    float centerY = cfg ? cfg->scorePosition * baseScale : (float)judgeLineY - 120;
+    float skinScale = (float)windowHeight / 768.0f;
+    float centerY = cfg ? cfg->scorePosition * skinScale : (float)judgeLineY - 120;
 
     SDL_SetTextureAlphaMod(tex, (Uint8)(alpha * 255));
 
@@ -1066,14 +1327,16 @@ void Renderer::renderHitJudgement(int judgement, int64_t elapsedMs) {
     }
 }
 
-void Renderer::renderSpeedInfo(int scrollSpeed, bool bpmScaleMode, bool autoPlay) {
+void Renderer::renderSpeedInfo(int scrollSpeed, bool bpmScaleMode, bool autoPlay, bool autoPlayEnabled) {
     if (!font) return;
     char buf[64];
     const char* modeStr = bpmScaleMode ? "BPM" : "Fixed";
     if (autoPlay) {
         snprintf(buf, sizeof(buf), "Speed: %d (%s) [AUTO]", scrollSpeed, modeStr);
+    } else if (autoPlayEnabled) {
+        snprintf(buf, sizeof(buf), "Speed: %d (%s) [Tab: Toggle AutoPlay]", scrollSpeed, modeStr);
     } else {
-        snprintf(buf, sizeof(buf), "Speed: %d (%s) [Tab:Auto]", scrollSpeed, modeStr);
+        snprintf(buf, sizeof(buf), "Speed: %d (%s)", scrollSpeed, modeStr);
     }
     SDL_Color white = {255, 255, 255, 255};
     SDL_Surface* surface = TTF_RenderText_Blended(font, buf, strlen(buf), white);
@@ -1085,13 +1348,13 @@ void Renderer::renderSpeedInfo(int scrollSpeed, bool bpmScaleMode, bool autoPlay
     SDL_DestroySurface(surface);
 }
 
-void Renderer::renderCombo(int combo, int64_t comboAnimTime, bool comboBreak, int64_t breakAnimTime) {
+void Renderer::renderCombo(int combo, int64_t comboAnimTime, bool comboBreak, int64_t breakAnimTime, int lastComboValue, bool holdActive, int64_t holdColorTime) {
     if (combo < 2 && !comboBreak) return;
 
     const ManiaConfig* cfg = skinManager ? skinManager->getManiaConfig(keyCount) : nullptr;
-    float baseScale = (float)windowHeight / 480.0f;
-    float elementScale = getElementScale();
-    float comboY = cfg ? cfg->comboPosition * baseScale : (judgeLineY - 100);
+    // comboPosition is pre-scaled to 768 coords
+    float skinScale = (float)windowHeight / 768.0f;
+    float comboY = cfg ? cfg->comboPosition * skinScale : (judgeLineY - 100);
 
     // Calculate stage center
     float stageX = (float)getLaneX(0);
@@ -1102,14 +1365,89 @@ void Renderer::renderCombo(int combo, int64_t comboAnimTime, bool comboBreak, in
     }
     float centerX = stageX + totalWidth / 2;
 
-    // Handle combo break animation (fade out + scale up)
-    if (comboBreak && breakAnimTime < 200) {
+    // Get colors from skin config
+    SDL_Color colorHold = cfg ? cfg->colourHold : SDL_Color{255, 191, 51, 255};
+    SDL_Color colorBreak = cfg ? cfg->colourBreak : SDL_Color{255, 0, 0, 255};
+    SDL_Color colorNormal = {255, 255, 255, 255};
+
+    // Calculate hold color transition (300ms)
+    SDL_Color currentColor = colorNormal;
+    if (holdColorTime < 300) {
+        float t = (float)holdColorTime / 300.0f;
+        if (holdActive) {
+            // White -> Hold color
+            currentColor.r = (uint8_t)(colorNormal.r + (colorHold.r - colorNormal.r) * t);
+            currentColor.g = (uint8_t)(colorNormal.g + (colorHold.g - colorNormal.g) * t);
+            currentColor.b = (uint8_t)(colorNormal.b + (colorHold.b - colorNormal.b) * t);
+        } else {
+            // Hold color -> White
+            currentColor.r = (uint8_t)(colorHold.r + (colorNormal.r - colorHold.r) * t);
+            currentColor.g = (uint8_t)(colorHold.g + (colorNormal.g - colorHold.g) * t);
+            currentColor.b = (uint8_t)(colorHold.b + (colorNormal.b - colorHold.b) * t);
+        }
+    } else {
+        currentColor = holdActive ? colorHold : colorNormal;
+    }
+
+    // Handle combo break animation (fade out + scale up, 200ms)
+    if (comboBreak && breakAnimTime < 200 && lastComboValue >= 2) {
         float t = (float)breakAnimTime / 200.0f;
         float alpha = 0.8f * (1.0f - t);
         float breakScale = 1.0f + 3.0f * t;  // 1->4
-        // Render the old combo with break animation using font
-        // (skin digits would need the old combo value stored)
-        return;  // Skip for now, just hide during break
+
+        // Render break combo with red color
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d", lastComboValue);
+
+        bool useSkinDigits = skinManager && skinManager->hasComboSkin();
+        if (useSkinDigits) {
+            int len = (int)strlen(buf);
+            float digitTotalW = 0;
+            std::vector<SDL_Texture*> digitTextures;
+            for (int i = 0; i < len; i++) {
+                int digit = buf[i] - '0';
+                SDL_Texture* tex = skinManager->getComboDigitTexture(digit);
+                if (!tex) { useSkinDigits = false; break; }
+                float texW, texH;
+                SDL_GetTextureSize(tex, &texW, &texH);
+                digitTextures.push_back(tex);
+                digitTotalW += texW;
+            }
+            if (useSkinDigits && !digitTextures.empty()) {
+                float startX = centerX - (digitTotalW * breakScale) / 2;
+                float curX = startX;
+                for (size_t i = 0; i < digitTextures.size(); i++) {
+                    SDL_Texture* tex = digitTextures[i];
+                    float texW, texH;
+                    SDL_GetTextureSize(tex, &texW, &texH);
+                    float w = texW * breakScale;
+                    float h = texH * breakScale;
+                    float y = comboY - (h - texH) / 2;
+                    SDL_SetTextureColorMod(tex, colorBreak.r, colorBreak.g, colorBreak.b);
+                    SDL_SetTextureAlphaMod(tex, (uint8_t)(alpha * 255));
+                    SDL_FRect dst = { curX, y, w, h };
+                    SDL_RenderTexture(renderer, tex, nullptr, &dst);
+                    SDL_SetTextureColorMod(tex, 255, 255, 255);
+                    SDL_SetTextureAlphaMod(tex, 255);
+                    curX += w;
+                }
+            }
+        }
+        if (!useSkinDigits && font) {
+            SDL_Color breakColor = {colorBreak.r, colorBreak.g, colorBreak.b, (uint8_t)(alpha * 255)};
+            SDL_Surface* surface = TTF_RenderText_Blended(font, buf, strlen(buf), breakColor);
+            if (surface) {
+                SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
+                float w = (float)surface->w * breakScale;
+                float h = (float)surface->h * breakScale;
+                float x = centerX - w / 2;
+                float y = comboY - (h - surface->h) / 2;
+                SDL_FRect dst = { x, y, w, h };
+                SDL_RenderTexture(renderer, texture, nullptr, &dst);
+                SDL_DestroyTexture(texture);
+                SDL_DestroySurface(surface);
+            }
+        }
     }
 
     if (combo < 2) return;
@@ -1145,8 +1483,8 @@ void Renderer::renderCombo(int combo, int64_t comboAnimTime, bool comboBreak, in
             float texW, texH;
             SDL_GetTextureSize(tex, &texW, &texH);
             digitTextures.push_back(tex);
-            digitWidths.push_back(texW * elementScale);
-            digitTotalW += texW * elementScale;
+            digitWidths.push_back(texW);
+            digitTotalW += texW;
         }
 
         if (useSkinDigits && !digitTextures.empty()) {
@@ -1158,12 +1496,17 @@ void Renderer::renderCombo(int combo, int64_t comboAnimTime, bool comboBreak, in
                 float texW, texH;
                 SDL_GetTextureSize(tex, &texW, &texH);
 
-                float w = texW * elementScale;
-                float h = texH * elementScale * scaleY;
-                float y = comboY - (h - texH * elementScale) / 2;  // Adjust for Y scale
+                float w = texW;
+                float h = texH * scaleY;
+                float y = comboY - (h - texH) / 2;  // Adjust for Y scale
 
                 SDL_FRect dst = { curX, y, w, h };
+                // Apply hold color modulation
+                SDL_SetTextureColorMod(tex, currentColor.r, currentColor.g, currentColor.b);
+                SDL_SetTextureAlphaMod(tex, currentColor.a);
                 SDL_RenderTexture(renderer, tex, nullptr, &dst);
+                SDL_SetTextureColorMod(tex, 255, 255, 255);
+                SDL_SetTextureAlphaMod(tex, 255);
                 curX += w;
             }
             return;
@@ -1175,8 +1518,7 @@ void Renderer::renderCombo(int combo, int64_t comboAnimTime, bool comboBreak, in
 
     char buf[32];
     snprintf(buf, sizeof(buf), "%d", combo);
-    SDL_Color yellow = {255, 255, 0, 255};
-    SDL_Surface* surface = TTF_RenderText_Blended(font, buf, strlen(buf), yellow);
+    SDL_Surface* surface = TTF_RenderText_Blended(font, buf, strlen(buf), currentColor);
     if (!surface) return;
     SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
 
@@ -1231,9 +1573,9 @@ void Renderer::renderHPBar(double hpPercent) {
         float scaledBgW = bgW * MANIA_SCALE;
         float scaledBgH = bgH * MANIA_SCALE * extraScale;
 
-        // Position: right of stage, bottom at hit position
+        // Position: right of stage, bottom at screen bottom
         float targetX = stageStartX + stageWidth + 1.0f * extraScale;
-        float targetY = skinHitPosition - scaledBgW;  // Top after rotation
+        float targetY = (float)windowHeight - scaledBgW;  // Bottom of screen
 
         // Calculate dstrect position for -90 degree rotation around center
         // After rotation: visual width = scaledBgH, visual height = scaledBgW
@@ -1253,8 +1595,8 @@ void Renderer::renderHPBar(double hpPercent) {
 
             // X position: use scaledFillH (not scaledBgH) for correct rotation alignment
             // Offset: +2 right, -4 up
-            float fillDstX = targetX - scaledFillW / 2 + scaledFillH / 2 + 17.0f;
-            float fillDstY = skinHitPosition - scaledFillH / 2 - scaledFillW / 2 - 3.0f;
+            float fillDstX = targetX - scaledFillW / 2 + scaledFillH / 2 + 16.0f;
+            float fillDstY = (float)windowHeight - scaledFillH / 2 - scaledFillW / 2 - 3.0f;
             SDL_FRect fillDst = { fillDstX, fillDstY, scaledFillW, scaledFillH };
 
             SDL_RenderTextureRotated(renderer, fillTex, &fillSrc, &fillDst, -90.0, nullptr, SDL_FLIP_NONE);
@@ -1623,7 +1965,7 @@ void Renderer::renderMenu() {
         SDL_DestroySurface(s);
     }
 
-    const char* version = "Version 0.0.1b";
+    const char* version = "Version 0.0.3a";
     s = TTF_RenderText_Blended(font, version, strlen(version), white);
     if (s) {
         SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);

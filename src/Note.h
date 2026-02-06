@@ -45,6 +45,9 @@ struct Note {
     int64_t headHitError;  // for hold note combined judgement
     bool hadComboBreak;    // true if released mid-hold or head missed
     bool headHit;          // true if head was hit (pressed in time)
+    bool headHitEarly;     // true if head was hit early (currentTime < note.time)
+    int64_t headReleaseTime; // time when head started falling (after release)
+    int64_t headGrayStartTime; // time when head started turning gray (60ms transition)
     float x;               // original X coordinate (for conversion)
     ObjectType objectType; // original object type (HitCircle/Slider/Spinner)
     int spanCount;         // for Slider: number of spans
@@ -72,15 +75,21 @@ struct Note {
     std::string tailFilename;
     int tailSampleHandle;
 
+    // Missed note fall animation (ignore SV)
+    int64_t missedTime;      // Time when note was missed
+    float missedY;           // Y position when note was missed
+    bool missedYSet;         // Whether missedY has been set
+
     Note(int lane, int64_t time, bool isHold = false, int64_t endTime = 0)
         : lane(lane), time(time), isHold(isHold), endTime(endTime),
           state(NoteState::Waiting), nextTickTime(0), headHitError(0),
-          hadComboBreak(false), headHit(false), x(0),
+          hadComboBreak(false), headHit(false), headHitEarly(false), headReleaseTime(0), headGrayStartTime(0), x(0),
           objectType(ObjectType::HitCircle), spanCount(1), segmentDuration(0),
           hasClap(false), hasFinish(false), isFakeNote(false),
           fakeNoteShouldFix(false), fakeNoteFixedY(0), fakeNoteHasFixedY(false),
           sampleSet(SampleSet::None), additions(SampleSet::None),
           customIndex(0), volume(0), sampleHandle(-1),
           tailSampleSet(SampleSet::None), tailAdditions(SampleSet::None),
-          tailCustomIndex(0), tailVolume(0), tailSampleHandle(-1) {}
+          tailCustomIndex(0), tailVolume(0), tailSampleHandle(-1),
+          missedTime(0), missedY(0), missedYSet(false) {}
 };

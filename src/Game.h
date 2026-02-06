@@ -11,6 +11,7 @@
 #include "HPManager.h"
 #include "KeySoundManager.h"
 #include "Storyboard.h"
+#include "PPCalculator.h"
 
 // Debug log entry for replay analysis
 struct DebugLogEntry {
@@ -38,6 +39,18 @@ enum class BeatmapSource {
     O2Jam
 };
 
+// Difficulty info for song select
+struct DifficultyInfo {
+    std::string path;       // Full path to beatmap file
+    std::string version;    // Difficulty name
+    std::string creator;    // Charter/mapper
+    std::string hash;       // MD5 hash of beatmap file
+    int keyCount;           // Number of keys (4K, 7K, etc.)
+    // Star ratings for each algorithm version (matches STAR_RATING_VERSION_COUNT)
+    // [0] = b20260101, [1] = b20220101
+    double starRatings[2] = {0.0, 0.0};
+};
+
 // Song entry for song select screen
 struct SongEntry {
     std::string folderPath;      // Full path to song folder
@@ -47,7 +60,8 @@ struct SongEntry {
     std::string backgroundPath;  // Path to background image
     std::string audioPath;       // Path to audio file
     int previewTime;             // Preview start time in ms
-    std::vector<std::string> beatmapFiles;  // List of beatmap files
+    std::vector<std::string> beatmapFiles;  // List of beatmap files (legacy)
+    std::vector<DifficultyInfo> difficulties;  // Detailed difficulty info
     BeatmapSource source;        // osu!, DJMAX, O2Jam
 };
 
@@ -77,7 +91,8 @@ private:
     void processJudgement(Judgement j, int lane);
     double calculateAccuracy();
     void updateReplay();
-    int64_t getCurrentGameTime() const;  // Helper to get current game time
+    int64_t getCurrentGameTime() const;  // Helper to get current game time (with audio offset, for judgement)
+    int64_t getRenderTime() const;        // Helper to get render time (without audio offset)
 
     Renderer renderer;
     AudioManager audio;
@@ -85,6 +100,7 @@ private:
     HPManager hpManager;
     KeySoundManager keySoundManager;
     Storyboard storyboard;
+    PPCalculator ppCalculator;
     BeatmapInfo beatmap;
     std::string beatmapPath;
     size_t currentStoryboardSample;  // Index for storyboard sample playback
@@ -104,6 +120,9 @@ private:
     bool hasBackgroundMusic;  // false for keysound-only maps
     bool autoPlay;
     double baseBPM;  // Base BPM from first timing point
+    double clockRate;           // Speed mod: 1.0, 1.5 (DT/NC), or 0.75 (HT)
+    double currentStarRating;   // Star rating with current mods applied
+    double scoreMultiplier;     // Score multiplier: 0.5 for HT, 1.0 for others
     int64_t startTime;
     static const int64_t PREPARE_TIME = 2500;
 
@@ -125,6 +144,8 @@ private:
     bool comboBreak;              // Whether combo just broke
     int64_t comboBreakTime;       // Time when combo broke
     int lastComboValue;           // Combo value before break (for break animation)
+    bool anyHoldActive;           // Whether any hold note is currently being held
+    int64_t holdColorChangeTime;  // Time when hold state changed (for color transition)
 
     int fps;
     int frameCount;
@@ -133,12 +154,18 @@ private:
     int64_t lastFrameTime;
     int targetFrameDelay;
 
-    int64_t judgeMarvelous;
-    int64_t judgePerfect;
-    int64_t judgeGreat;
-    int64_t judgeGood;
-    int64_t judgeBad;
-    int64_t judgeMiss;  // miss window (188 - 3 * OD)
+    // Performance monitoring
+    double perfInput;   // Input handling time (ms)
+    double perfUpdate;  // Update time (ms)
+    double perfDraw;    // Draw time (ms)
+    double perfAudio;   // Audio time (ms)
+
+    double judgeMarvelous;
+    double judgePerfect;
+    double judgeGreat;
+    double judgeGood;
+    double judgeBad;
+    double judgeMiss;  // miss window (188 - 3 * OD)
 
     int mouseX, mouseY;
     bool mouseClicked;
@@ -155,9 +182,15 @@ private:
     bool resolutionDropdownExpanded;
     bool refreshRateDropdownExpanded;
     bool keyCountDropdownExpanded;  // for key count selection
+    bool starRatingDropdownExpanded;  // for star rating version selection
+    float settingsScroll;  // Scroll offset for settings panel
+    bool settingsDragging;  // Mouse drag scrolling for settings
+    int settingsDragStartY;
+    float settingsDragStartScroll;
     int judgeDetailPopup;  // -1=none, 0-5=which judgement detail is open
     int pauseMenuSelection;  // 0=Resume, 1=Retry, 2=Exit
     int64_t pauseTime;  // time when paused
+    int64_t pauseGameTime;  // game time when paused (for rendering)
     int64_t allNotesFinishedTime;  // time when all notes were processed
     bool showEndPrompt;  // show "Press Enter to finish" prompt
 
@@ -180,6 +213,9 @@ private:
     int selectedDifficultyIndex;  // Selected difficulty within the song
     float songSelectScroll;  // Scroll offset for song list
     bool songSelectNeedAutoScroll;  // Flag to trigger auto-scroll on selection change
+    bool songSelectDragging;  // Mouse drag scrolling
+    int songSelectDragStartY;  // Mouse Y when drag started
+    float songSelectDragStartScroll;  // Scroll value when drag started
     SDL_Texture* currentBgTexture;  // Background texture for selected song
     bool songSelectTransition;  // True when transitioning out
     int64_t songSelectTransitionStart;  // Transition start time

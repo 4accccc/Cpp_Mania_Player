@@ -35,9 +35,14 @@ public:
 
 private:
     double mapDifficultyRange(double difficulty, double min, double mid, double max);
+    static double easeOutQuint(double t);
 
     double currentHP_;      // Current displayed HP (smoothed)
     double targetHP_;       // Target HP (actual value)
-    double recoveryRate_;   // HP recovery rate
     double hpDrainRate_;    // HP difficulty parameter (0-10)
+
+    // Transition state for lazer-style smoothing
+    static constexpr double TRANSITION_DURATION = 200.0;  // 200ms
+    double transitionStartHP_;   // HP value when transition started
+    double transitionTime_;      // Time elapsed since transition started (ms)
 };

@@ -76,6 +76,9 @@ public:
     // Get OJN header info
     static bool getHeader(const std::string& filepath, OjnHeader& header);
 
+    // Extract cover image from OJN file, returns path to extracted image
+    static std::string extractCover(const std::string& filepath);
+
 private:
     // Convert measure position to milliseconds
     static int64_t measureToMs(int measure, int position, float bpm,

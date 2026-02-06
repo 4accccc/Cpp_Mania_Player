@@ -73,18 +73,28 @@ struct Settings {
     bool deathEnabled;     // Death mod - HP=0 causes death
     bool suddenDeathEnabled; // Sudden Death mod - any miss causes death
 
+    // Speed modifiers (mutually exclusive: HT vs DT/NC)
+    bool doubleTimeEnabled;    // Double Time mod (1.5x speed)
+    bool nightcoreEnabled;     // Nightcore mod (1.5x speed)
+    bool halfTimeEnabled;      // Half Time mod (0.75x speed)
+
     // Scroll speed settings (osu!mania style)
     int scrollSpeed;       // 1-40, default 24
     bool bpmScaleMode;     // true=BPM scale, false=fixed speed (default)
+    bool unlimitedSpeed;   // Fun mode: no scroll speed limit
 
     // Skin settings
     std::string skinPath;
     bool ignoreBeatmapSkin;
     bool ignoreBeatmapHitsounds;
     bool disableStoryboard;
+    int backgroundDim;  // Background dim percentage (0-100)
 
     // Debug settings
     bool debugEnabled;     // Enable debug logging for replay analysis
+
+    // Star rating settings
+    int starRatingVersion;  // 0 = b20260101
 
     Settings() {
         volume = 100;
@@ -133,15 +143,24 @@ struct Settings {
         deathEnabled = false;     // Death mod disabled by default
         suddenDeathEnabled = false; // Sudden Death mod disabled by default
 
+        // Speed mods disabled by default
+        doubleTimeEnabled = false;
+        nightcoreEnabled = false;
+        halfTimeEnabled = false;
+
         scrollSpeed = 24;         // Default scroll speed (osu! default is around 24)
         bpmScaleMode = false;     // Default to fixed speed mode
+        unlimitedSpeed = false;   // Default to limited speed (1-40)
 
         skinPath = "";
         ignoreBeatmapSkin = false;
         ignoreBeatmapHitsounds = false;
         disableStoryboard = false;
+        backgroundDim = 80;  // Default 80% dim
 
         debugEnabled = false;
+
+        starRatingVersion = 0;  // Default: b20260101
 
         int64_t windows[] = {16, 64, 97, 127, 151, 188};
         double accs[] = {100, 100, 66.67, 33.33, 16.67, 0};

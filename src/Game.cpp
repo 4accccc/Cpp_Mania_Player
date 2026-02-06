@@ -4,6 +4,8 @@
 #include "DJMaxParser.h"
 #include "OjnParser.h"
 #include "OjmParser.h"
+#include "StarRating.h"
+#include "SongIndex.h"
 #include "stb_image.h"
 #include <SDL3/SDL.h>
 #include <iostream>
@@ -11,8 +13,48 @@
 #include <sstream>
 #include <filesystem>
 #include <cmath>
+#include <numeric>
+#include <algorithm>
+
+// ICU for locale-aware string comparison
+#include <unicode/ucol.h>
+#include <unicode/ustring.h>
 
 namespace fs = std::filesystem;
+
+// Helper function to format difficulty name (separate function to avoid optimizer issues)
+static std::string formatDifficultyName(const SongEntry& song, int d, int starRatingVersion) {
+    std::string diffName;
+    if (d >= 0 && d < (int)song.difficulties.size()) {
+        const auto& diff = song.difficulties[d];
+        diffName = diff.version;
+        if (!diff.creator.empty()) {
+            diffName += " (" + diff.creator + ")";
+        }
+        diffName += " [" + std::to_string(diff.keyCount) + "K]";
+        char starStr[32];
+        snprintf(starStr, sizeof(starStr), " %.2f", diff.starRatings[starRatingVersion]);
+        diffName += starStr;
+        diffName += "\xe2\x98\x85";
+    } else if (d >= 0 && d < (int)song.beatmapFiles.size()) {
+        diffName = song.beatmapFiles[d];
+        size_t lastSlash = diffName.find_last_of("/\\");
+        if (lastSlash != std::string::npos) {
+            diffName = diffName.substr(lastSlash + 1);
+        }
+    }
+    return diffName;
+}
+
+// Helper function to convert settings int to StarRatingVersion enum
+static StarRatingVersion getStarRatingVersion(int settingValue) {
+    switch (settingValue) {
+        case 1: return StarRatingVersion::OsuStable_b20220101;
+        case 0:
+        default: return StarRatingVersion::OsuStable_b20260101;
+    }
+}
+
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
@@ -23,22 +65,28 @@ namespace fs = std::filesystem;
 #endif
 
 Game::Game() : state(GameState::Menu), running(false), musicStarted(false), hasBackgroundMusic(true), autoPlay(false),
-               baseBPM(120.0), startTime(0), combo(0), maxCombo(0), score(0), scoreAccumulator(0.0), bonus(100.0), totalNotes(0),
+               baseBPM(120.0), clockRate(1.0), currentStarRating(0.0), scoreMultiplier(1.0),
+               startTime(0), combo(0), maxCombo(0), score(0), scoreAccumulator(0.0), bonus(100.0), totalNotes(0),
                lastJudgementTime(0), lastComboChangeTime(0), comboBreak(false), comboBreakTime(0), lastComboValue(0),
+               anyHoldActive(false), holdColorChangeTime(0),
                fps(0), frameCount(0), lastFpsTime(0), totalTime(0),
                lastFrameTime(0), targetFrameDelay(1),
+               perfInput(0), perfUpdate(0), perfDraw(0), perfAudio(0),
                mouseX(0), mouseY(0), mouseClicked(false), mouseDown(false),
                settingsCategory(SettingsCategory::Sound), keyBindingIndex(0),
                editingValue(0), editingVolume(false),
                dropdownExpanded(false), judgeModeDropdownExpanded(false),
                resolutionDropdownExpanded(false), refreshRateDropdownExpanded(false),
                keyCountDropdownExpanded(false),
+               starRatingDropdownExpanded(false),
+               settingsScroll(0), settingsDragging(false), settingsDragStartY(0), settingsDragStartScroll(0),
                judgeDetailPopup(-1), pauseMenuSelection(0), pauseTime(0),
                replayMode(false), currentReplayFrame(0),
                lastRecordedKeyState(0),
                allNotesFinishedTime(0), showEndPrompt(false), editingUsername(false),
                editingScrollSpeed(false),
-               selectedSongIndex(0), selectedDifficultyIndex(0), songSelectScroll(0.0f), songSelectNeedAutoScroll(false), currentBgTexture(nullptr),
+               selectedSongIndex(0), selectedDifficultyIndex(0), songSelectScroll(0.0f), songSelectNeedAutoScroll(false),
+               songSelectDragging(false), songSelectDragStartY(0), songSelectDragStartScroll(0.0f), currentBgTexture(nullptr),
                songSelectTransition(false), songSelectTransitionStart(0),
                previewFading(false), previewFadeIn(true), previewFadeStart(0),
                previewFadeDuration(200), previewTargetIndex(-1) {
@@ -58,8 +106,26 @@ Game::~Game() {
 }
 
 bool Game::init() {
+#ifdef _WIN32
+    // Prevent multiple instances using a named mutex
+    HANDLE hMutex = CreateMutexA(NULL, TRUE, "ManiaPlayerSingleInstance");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(hMutex);
+        return false;  // Another instance is already running
+    }
+#endif
+
     // Load config first
     loadConfig();
+
+#ifdef _WIN32
+    // Show console if debug is enabled
+    if (settings.debugEnabled) {
+        AllocConsole();
+        freopen("CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stderr);
+    }
+#endif
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         std::cerr << "SDL init failed: " << SDL_GetError() << std::endl;
@@ -94,6 +160,9 @@ bool Game::init() {
         skinManager.loadSkin(settings.skinPath, renderer.getRenderer());
     }
 
+    // Load song index at startup
+    scanSongsFolder();
+
     return true;
 }
 
@@ -116,16 +185,20 @@ std::string Game::openFileDialog() {
 
 std::string Game::openReplayDialog() {
 #ifdef _WIN32
-    char filename[MAX_PATH] = "";
-    OPENFILENAMEA ofn = {};
+    wchar_t filename[MAX_PATH] = L"";
+    OPENFILENAMEW ofn = {};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = NULL;
-    ofn.lpstrFilter = "osu! Replay (*.osr)\0*.osr\0All Files\0*.*\0";
+    ofn.lpstrFilter = L"osu! Replay (*.osr)\0*.osr\0All Files\0*.*\0";
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-    if (GetOpenFileNameA(&ofn)) {
-        return std::string(filename);
+    if (GetOpenFileNameW(&ofn)) {
+        // Convert wchar_t to UTF-8
+        int size = WideCharToMultiByte(CP_UTF8, 0, filename, -1, nullptr, 0, nullptr, nullptr);
+        std::string result(size - 1, 0);
+        WideCharToMultiByte(CP_UTF8, 0, filename, -1, &result[0], size, nullptr, nullptr);
+        return result;
     }
 #endif
     return "";
@@ -133,17 +206,21 @@ std::string Game::openReplayDialog() {
 
 std::string Game::saveReplayDialog() {
 #ifdef _WIN32
-    char filename[MAX_PATH] = "replay.osr";
-    OPENFILENAMEA ofn = {};
+    wchar_t filename[MAX_PATH] = L"replay.osr";
+    OPENFILENAMEW ofn = {};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = NULL;
-    ofn.lpstrFilter = "osu! Replay (*.osr)\0*.osr\0";
+    ofn.lpstrFilter = L"osu! Replay (*.osr)\0*.osr\0";
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
-    ofn.lpstrDefExt = "osr";
-    if (GetSaveFileNameA(&ofn)) {
-        return std::string(filename);
+    ofn.lpstrDefExt = L"osr";
+    if (GetSaveFileNameW(&ofn)) {
+        // Convert wchar_t to UTF-8
+        int size = WideCharToMultiByte(CP_UTF8, 0, filename, -1, nullptr, 0, nullptr, nullptr);
+        std::string result(size - 1, 0);
+        WideCharToMultiByte(CP_UTF8, 0, filename, -1, &result[0], size, nullptr, nullptr);
+        return result;
     }
 #endif
     return "";
@@ -174,6 +251,7 @@ void Game::saveConfig() {
     file << "[Sound]\n";
     file << "volume=" << settings.volume << "\n";
     file << "audioDevice=" << settings.audioDevice << "\n";
+    file << "audioOffset=" << settings.audioOffset << "\n";
 
     file << "\n[Graphics]\n";
     file << "resolution=" << settings.resolution << "\n";
@@ -206,19 +284,25 @@ void Game::saveConfig() {
     file << "\n[Scroll]\n";
     file << "scrollSpeed=" << settings.scrollSpeed << "\n";
     file << "bpmScaleMode=" << (settings.bpmScaleMode ? 1 : 0) << "\n";
+    file << "unlimitedSpeed=" << (settings.unlimitedSpeed ? 1 : 0) << "\n";
 
     file << "\n[Skin]\n";
     file << "skinPath=" << settings.skinPath << "\n";
     file << "ignoreBeatmapSkin=" << (settings.ignoreBeatmapSkin ? 1 : 0) << "\n";
     file << "ignoreBeatmapHitsounds=" << (settings.ignoreBeatmapHitsounds ? 1 : 0) << "\n";
     file << "disableStoryboard=" << (settings.disableStoryboard ? 1 : 0) << "\n";
+    file << "backgroundDim=" << settings.backgroundDim << "\n";
 
     file << "\n[Misc]\n";
     file << "username=" << settings.username << "\n";
     file << "forceOverrideUsername=" << (settings.forceOverrideUsername ? 1 : 0) << "\n";
     file << "debugEnabled=" << (settings.debugEnabled ? 1 : 0) << "\n";
+    file << "ignoreSV=" << (settings.ignoreSV ? 1 : 0) << "\n";
 
-    file.close();
+    file << "\n[StarRating]\n";
+    file << "starRatingVersion=" << settings.starRatingVersion << "\n";
+
+    file.close();;
 }
 
 void Game::loadConfig() {
@@ -251,6 +335,7 @@ void Game::loadConfig() {
             if (section == "Sound") {
                 if (key == "volume") settings.volume = std::stoi(value);
                 else if (key == "audioDevice") settings.audioDevice = std::stoi(value);
+                else if (key == "audioOffset") settings.audioOffset = std::stoi(value);
             }
             else if (section == "Graphics") {
                 if (key == "resolution") settings.resolution = std::stoi(value);
@@ -285,17 +370,23 @@ void Game::loadConfig() {
             else if (section == "Scroll") {
                 if (key == "scrollSpeed") settings.scrollSpeed = std::stoi(value);
                 else if (key == "bpmScaleMode") settings.bpmScaleMode = (value == "1");
+                else if (key == "unlimitedSpeed") settings.unlimitedSpeed = (value == "1");
             }
             else if (section == "Skin") {
                 if (key == "skinPath") settings.skinPath = value;
                 else if (key == "ignoreBeatmapSkin") settings.ignoreBeatmapSkin = (value == "1");
                 else if (key == "ignoreBeatmapHitsounds") settings.ignoreBeatmapHitsounds = (value == "1");
                 else if (key == "disableStoryboard") settings.disableStoryboard = (value == "1");
+                else if (key == "backgroundDim") settings.backgroundDim = std::stoi(value);
             }
             else if (section == "Misc") {
                 if (key == "username") settings.username = value;
                 else if (key == "forceOverrideUsername") settings.forceOverrideUsername = (value == "1");
                 else if (key == "debugEnabled") settings.debugEnabled = (value == "1");
+                else if (key == "ignoreSV") settings.ignoreSV = (value == "1");
+            }
+            else if (section == "StarRating") {
+                if (key == "starRatingVersion") settings.starRatingVersion = std::stoi(value);
             }
         } catch (...) {
             // Ignore parsing errors
@@ -340,11 +431,32 @@ void Game::resetGame() {
     comboBreak = false;
     comboBreakTime = 0;
     lastComboValue = 0;
+    anyHoldActive = false;
+    holdColorChangeTime = 0;
+    ppCalculator.reset();
 }
 
 bool Game::loadBeatmap(const std::string& path) {
     resetGame();
     beatmapPath = path;
+
+    // Stop any playing audio first (preview music)
+    audio.stop();
+
+    // Calculate clockRate early so audio loading uses correct playback rate
+    clockRate = 1.0;
+    scoreMultiplier = 1.0;
+    // Apply DT/NC/HT only if not in replay mode (replay mode uses mods from replay file)
+    if (!replayMode) {
+        if (settings.halfTimeEnabled) {
+            clockRate = 0.75;
+            scoreMultiplier = 0.5;
+        } else if (settings.doubleTimeEnabled || settings.nightcoreEnabled) {
+            clockRate = 1.5;
+        }
+        audio.setPlaybackRate(static_cast<float>(clockRate));
+        audio.setChangePitch(settings.nightcoreEnabled);
+    }
 
     // Check for O2Jam difficulty suffix (path.ojn:difficulty:level)
     OjnDifficulty ojnDifficulty = OjnDifficulty::Hard;
@@ -518,7 +630,10 @@ bool Game::loadBeatmap(const std::string& path) {
 
     std::filesystem::path fullAudioPath = osuPath.parent_path() / beatmap.audioFilename;
     std::string audioPath = fullAudioPath.u8string();
-    hasBackgroundMusic = audio.loadMusic(audioPath);
+
+    // Load music (BASS handles real-time tempo change)
+    hasBackgroundMusic = audio.loadMusic(audioPath, false);  // Don't loop for gameplay
+
     if (!hasBackgroundMusic) {
         // Some beatmaps (like piano keysound maps) have no background music
         // All audio is played through key sounds
@@ -529,6 +644,11 @@ bool Game::loadBeatmap(const std::string& path) {
     keySoundManager.setBeatmapDirectory(osuPath.parent_path().u8string());
     if (!settings.ignoreBeatmapHitsounds) {
         keySoundManager.preloadKeySounds(beatmap.notes);
+        // Sort storyboard samples by time to ensure correct playback order
+        std::sort(beatmap.storyboardSamples.begin(), beatmap.storyboardSamples.end(),
+            [](const StoryboardSample& a, const StoryboardSample& b) {
+                return a.time < b.time;
+            });
         keySoundManager.preloadStoryboardSamples(beatmap.storyboardSamples);
     }
 
@@ -550,6 +670,14 @@ bool Game::loadBeatmap(const std::string& path) {
             storyboard.loadFromOsb(osbPath);
         }
 
+        // For O2Jam: set background from extracted cover image
+        if (isOjn && !storyboard.hasBackground()) {
+            std::string coverPath = OjnParser::extractCover(actualPath);
+            if (!coverPath.empty()) {
+                storyboard.setBackgroundImage(coverPath);
+            }
+        }
+
         storyboard.loadTextures(renderer.getRenderer());
     }
 
@@ -566,13 +694,22 @@ bool Game::loadBeatmap(const std::string& path) {
         judgeBad = settings.judgements[4].window;
         judgeMiss = settings.judgements[5].window;
     } else {
-        judgeMarvelous = 16;
-        judgePerfect = static_cast<int64_t>(64 - 3 * od);
-        judgeGreat = static_cast<int64_t>(97 - 3 * od);
-        judgeGood = static_cast<int64_t>(127 - 3 * od);
-        judgeBad = static_cast<int64_t>(151 - 3 * od);
-        judgeMiss = static_cast<int64_t>(188 - 3 * od);
+        judgeMarvelous = 16.0;
+        judgePerfect = 64.0 - 3.0 * od;
+        judgeGreat = 97.0 - 3.0 * od;
+        judgeGood = 127.0 - 3.0 * od;
+        judgeBad = 151.0 - 3.0 * od;
+        judgeMiss = 188.0 - 3.0 * od;
     }
+
+    // Scale judgement windows by clockRate (DT/HT compensation)
+    // In osu!, game-time windows are scaled by clockRate
+    judgeMarvelous = judgeMarvelous * clockRate;
+    judgePerfect = judgePerfect * clockRate;
+    judgeGreat = judgeGreat * clockRate;
+    judgeGood = judgeGood * clockRate;
+    judgeBad = judgeBad * clockRate;
+    judgeMiss = judgeMiss * clockRate;
 
     if (!beatmap.notes.empty()) {
         totalNotes = 0;
@@ -590,6 +727,11 @@ bool Game::loadBeatmap(const std::string& path) {
         // Skip is available if there's enough blank time before first note
         // Condition: firstNoteTime - 2000 > 3000 (simplified from osu! formula)
         canSkip = (skipTargetTime > 3000);
+
+        // Calculate star rating with clockRate and initialize PP calculator
+        currentStarRating = calculateStarRating(beatmap.notes, beatmap.keyCount,
+            static_cast<StarRatingVersion>(settings.starRatingVersion), clockRate);
+        ppCalculator.init(totalNotes, currentStarRating);
     }
     return true;
 }
@@ -599,10 +741,19 @@ void Game::run() {
     state = GameState::Menu;
     lastFrameTime = SDL_GetTicks();
 
+    Uint64 perfFreq = SDL_GetPerformanceFrequency();
+
     while (running) {
+        Uint64 frameStartPerf = SDL_GetPerformanceCounter();
         int64_t frameStart = SDL_GetTicks();
 
+        // Performance monitoring - Input
+        Uint64 t1 = SDL_GetPerformanceCounter();
         handleInput();
+        Uint64 t2 = SDL_GetPerformanceCounter();
+        perfInput = (double)(t2 - t1) * 1000.0 / perfFreq;
+
+        // Performance monitoring - Update
         if (state == GameState::Playing) {
             update();
         } else if (state == GameState::Dead) {
@@ -612,11 +763,27 @@ void Game::run() {
                 if (deathSlowdown < 0.0f) deathSlowdown = 0.0f;
             }
         }
-        render();
+        Uint64 t3 = SDL_GetPerformanceCounter();
+        perfUpdate = (double)(t3 - t2) * 1000.0 / perfFreq;
 
-        int64_t frameTime = SDL_GetTicks() - frameStart;
-        if (frameTime < targetFrameDelay) {
-            SDL_Delay((Uint32)(targetFrameDelay - frameTime));
+        // Performance monitoring - Draw
+        render();
+        Uint64 t4 = SDL_GetPerformanceCounter();
+        perfDraw = (double)(t4 - t3) * 1000.0 / perfFreq;
+
+        // High-precision frame timing
+        double targetFrameTimeUs = targetFrameDelay * 1000.0;  // Convert ms to us
+        while (true) {
+            Uint64 now = SDL_GetPerformanceCounter();
+            double elapsedUs = (double)(now - frameStartPerf) * 1000000.0 / perfFreq;
+            if (elapsedUs >= targetFrameTimeUs) break;
+
+            // If more than 2ms remaining, use SDL_Delay to save CPU
+            double remainingMs = (targetFrameTimeUs - elapsedUs) / 1000.0;
+            if (remainingMs > 2.0) {
+                SDL_Delay(1);
+            }
+            // Otherwise busy-wait for precision
         }
     }
 }
@@ -633,16 +800,38 @@ void Game::handleInput() {
             SDL_RenderCoordinatesFromWindow(renderer.getRenderer(), e.motion.x, e.motion.y, &fx, &fy);
             mouseX = (int)fx;
             mouseY = (int)fy;
+            // Handle drag scrolling in song select
+            if (state == GameState::SongSelect && songSelectDragging) {
+                songSelectScroll = songSelectDragStartScroll + (songSelectDragStartY - mouseY);
+                if (songSelectScroll < 0) songSelectScroll = 0;
+            }
         }
         else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
             if (e.button.button == SDL_BUTTON_LEFT) {
-                mouseClicked = true;
+                // In song select, don't set mouseClicked on down - wait for up
+                if (state != GameState::SongSelect) {
+                    mouseClicked = true;
+                }
                 mouseDown = true;
+                // Start drag scrolling in song select
+                if (state == GameState::SongSelect) {
+                    songSelectDragging = true;
+                    songSelectDragStartY = mouseY;
+                    songSelectDragStartScroll = songSelectScroll;
+                }
             }
         }
         else if (e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
             if (e.button.button == SDL_BUTTON_LEFT) {
                 mouseDown = false;
+                // In song select, only trigger click if not dragging
+                if (state == GameState::SongSelect && songSelectDragging) {
+                    bool isDragging = std::abs(mouseY - songSelectDragStartY) > 5;
+                    if (!isDragging) {
+                        mouseClicked = true;
+                    }
+                }
+                songSelectDragging = false;
             }
         }
         else if (e.type == SDL_EVENT_MOUSE_WHEEL) {
@@ -650,6 +839,20 @@ void Game::handleInput() {
                 songSelectScroll -= e.wheel.y * 60;  // 60 pixels per scroll
                 // Clamp will be handled in render loop where we know the total height
                 if (songSelectScroll < 0) songSelectScroll = 0;
+            }
+            else if (state == GameState::Settings) {
+                // Check if mouse is in content area
+                float winX = (1280 - 800) / 2;
+                float winY = (720 - 500) / 2;
+                float contentX = winX + 180;
+                float contentY = winY + 60;
+                float contentW = 600;
+                float contentH = 390;
+                if (mouseX >= contentX && mouseX <= contentX + contentW &&
+                    mouseY >= contentY && mouseY <= contentY + contentH) {
+                    settingsScroll -= e.wheel.y * 40;
+                    if (settingsScroll < 0) settingsScroll = 0;
+                }
             }
         }
         else if (e.type == SDL_EVENT_TEXT_INPUT) {
@@ -660,9 +863,9 @@ void Game::handleInput() {
                 }
             }
             if (state == GameState::Settings && editingScrollSpeed) {
-                // Append typed character to scroll speed (only digits, limit to 2 chars)
+                // Append typed character to scroll speed (only digits, limit to 4 chars)
                 char c = e.text.text[0];
-                if (c >= '0' && c <= '9' && scrollSpeedInput.length() < 2) {
+                if (c >= '0' && c <= '9' && scrollSpeedInput.length() < 4) {
                     scrollSpeedInput += c;
                 }
             }
@@ -721,6 +924,22 @@ void Game::handleInput() {
                         }
                     }
                 }
+                else if (e.key.key == SDLK_F5) {
+                    // Force rebuild index (like Clear Index)
+                    std::string indexDir = SongIndex::getIndexDir();
+                    if (std::filesystem::exists(indexDir)) {
+                        std::filesystem::remove_all(indexDir);
+                    }
+                    songList.clear();
+                    scanSongsFolder();
+                    selectedSongIndex = 0;
+                    selectedDifficultyIndex = 0;
+                    songSelectScroll = 0.0f;
+                    if (!songList.empty()) {
+                        loadSongBackground(0);
+                        playPreviewMusic(0);
+                    }
+                }
             }
             else if (state == GameState::Settings) {
                 if (editingUsername) {
@@ -740,7 +959,11 @@ void Game::handleInput() {
                         if (!scrollSpeedInput.empty()) {
                             try {
                                 int newSpeed = std::stoi(scrollSpeedInput);
-                                settings.scrollSpeed = std::max(1, std::min(40, newSpeed));
+                                if (settings.unlimitedSpeed) {
+                                    settings.scrollSpeed = std::max(1, newSpeed);
+                                } else {
+                                    settings.scrollSpeed = std::max(1, std::min(40, newSpeed));
+                                }
                             } catch (...) {}
                         }
                         scrollSpeedInput = std::to_string(settings.scrollSpeed);
@@ -792,6 +1015,7 @@ void Game::handleInput() {
                             int64_t pausedDuration = SDL_GetTicks() - pauseTime;
                             startTime += pausedDuration;
                             audio.resume();
+                            audio.resumeAllSamples();
                             state = GameState::Playing;
                         } else if (pauseMenuSelection == 1) {
                             // Retry
@@ -802,10 +1026,15 @@ void Game::handleInput() {
                                 startTime = SDL_GetTicks();
                             }
                         } else {
-                            // Exit
+                            // Exit to song select
                             audio.stop();
-                            state = GameState::Menu;
+                            audio.stopAllSamples();
+                            state = GameState::SongSelect;
                             renderer.setWindowTitle("Mania Player");
+                            if (!songList.empty()) {
+                                loadSongBackground(selectedSongIndex);
+                                playPreviewMusic(selectedSongIndex);
+                            }
                         }
                         break;
                     case SDLK_ESCAPE:
@@ -813,6 +1042,7 @@ void Game::handleInput() {
                         int64_t pausedDuration = SDL_GetTicks() - pauseTime;
                         startTime += pausedDuration;
                         audio.resume();
+                        audio.resumeAllSamples();
                         state = GameState::Playing;
                         break;
                 }
@@ -833,7 +1063,8 @@ void Game::handleInput() {
                             // Export Replay
                             std::string savePath = saveReplayDialog();
                             if (!savePath.empty()) {
-                                std::string exportPlayerName = settings.username;
+                                // AutoPlay forces player name to "Mr.AutoPlay"
+                                std::string exportPlayerName = autoPlay ? "Mr.AutoPlay" : settings.username;
                                 int mods = 0;
                                 if (autoPlay) mods |= 2048;
                                 if (settings.suddenDeathEnabled) mods |= 32;
@@ -849,10 +1080,15 @@ void Game::handleInput() {
                                 startTime = SDL_GetTicks();
                             }
                         } else {
-                            // Quit
+                            // Quit to song select
                             audio.stop();
-                            state = GameState::Menu;
+                            audio.stopAllSamples();
+                            state = GameState::SongSelect;
                             renderer.setWindowTitle("Mania Player");
+                            if (!songList.empty()) {
+                                loadSongBackground(selectedSongIndex);
+                                playPreviewMusic(selectedSongIndex);
+                            }
                         }
                         break;
                 }
@@ -860,7 +1096,9 @@ void Game::handleInput() {
             else if (state == GameState::Playing && !e.key.repeat) {
                 switch (e.key.key) {
                     case SDLK_ESCAPE:
+                        pauseGameTime = getCurrentGameTime();  // Save game time before pausing
                         audio.pause();
+                        audio.pauseAllSamples();
                         pauseTime = SDL_GetTicks();
                         pauseMenuSelection = 0;
                         state = GameState::Paused;
@@ -910,10 +1148,16 @@ void Game::handleInput() {
                         }
                         break;
                     case SDLK_EQUALS:
-                        settings.scrollSpeed = std::min(40, settings.scrollSpeed + 1);
+                        if (settings.unlimitedSpeed) {
+                            settings.scrollSpeed = settings.scrollSpeed + 1;
+                        } else {
+                            settings.scrollSpeed = std::min(40, settings.scrollSpeed + 1);
+                        }
+                        saveConfig();
                         break;
                     case SDLK_MINUS:
                         settings.scrollSpeed = std::max(1, settings.scrollSpeed - 1);
+                        saveConfig();
                         break;
                     case SDLK_TAB:
                         // Only allow Tab to toggle autoPlay in replay mode
@@ -969,12 +1213,13 @@ void Game::update() {
     // For keysound-only maps, use system time instead of audio position
     int64_t currentTime;
     if (!musicStarted) {
-        currentTime = elapsed - PREPARE_TIME;
+        // Prepare phase: scale time so note fall speed matches gameplay
+        currentTime = static_cast<int64_t>((elapsed - PREPARE_TIME) * clockRate);
     } else if (hasBackgroundMusic) {
         currentTime = audio.getPosition();
     } else {
-        // No background music: use elapsed time
-        currentTime = elapsed - PREPARE_TIME;
+        // No background music: use elapsed time scaled by playback rate
+        currentTime = static_cast<int64_t>((elapsed - PREPARE_TIME) * clockRate);
     }
 
     // Update skip availability
@@ -1013,7 +1258,8 @@ void Game::update() {
     hpManager.update(deltaTime);
 
     // Death mod: check if HP reached 0 (use targetHP, not smoothed currentHP)
-    if (settings.deathEnabled && hpManager.getTargetHP() <= 0.0 && !autoPlay) {
+    // Replay mode ignores Death mod
+    if (settings.deathEnabled && !replayMode && hpManager.getTargetHP() <= 0.0 && !autoPlay) {
         state = GameState::Dead;
         deathTime = currentTime;
         deathSlowdown = 1.0f;
@@ -1032,6 +1278,8 @@ void Game::update() {
                 if (note.isHold) {
                     // Hold note: start holding, set up ticks, no judgement yet
                     note.state = NoteState::Holding;
+                    note.headHit = true;  // Mark head as hit so it stops at judge line
+                    note.headHitEarly = false;  // AutoPlay hits exactly on time
                     note.headHitError = 0;
                     note.nextTickTime = note.time;
                     laneKeyDown[note.lane] = true;
@@ -1039,6 +1287,7 @@ void Game::update() {
                 } else {
                     // Regular note: immediate judgement
                     note.state = NoteState::Hit;
+                    renderer.triggerLightingN(note.lane, currentTime);
                     processJudgement(Judgement::Marvelous, note.lane);
                     hitErrors.push_back({(int64_t)SDL_GetTicks(), 0});  // AutoPlay has 0 offset
                     // Record key press and release for regular note
@@ -1072,6 +1321,7 @@ void Game::update() {
 
                 // Hold note end: give judgement with combo and score
                 note.state = NoteState::Hit;
+                renderer.triggerLightingN(note.lane, currentTime);
                 processJudgement(Judgement::Marvelous, note.lane);
                 hitErrors.push_back({(int64_t)SDL_GetTicks(), 0});  // AutoPlay has 0 offset
                 laneKeyDown[note.lane] = false;
@@ -1144,11 +1394,20 @@ void Game::update() {
         if (note.isFakeNote) continue;  // Skip fake notes - visual only
         if (note.state == NoteState::Waiting && note.time < currentTime - judgeBad) {
             if (note.isHold) {
-                // Hold note head missed - keep showing until tail, don't record miss yet
+                // Hold note head missed
                 note.state = NoteState::Holding;
-                note.hadComboBreak = true;
                 note.headHitError = judgeBad;
-                note.nextTickTime = currentTime;  // Allow ticks if user holds later
+                // If user is already holding the key, don't gray out, don't allow ticks
+                // User must release and re-press to get combo
+                if (laneKeyDown[note.lane]) {
+                    // User was holding before note arrived - no gray, no combo
+                    note.hadComboBreak = false;
+                    note.nextTickTime = INT64_MAX;  // Disable ticks
+                } else {
+                    // Normal head miss
+                    note.hadComboBreak = true;
+                    note.nextTickTime = currentTime;
+                }
                 combo = 0;  // Break combo when head is missed
             } else {
                 note.state = NoteState::Missed;
@@ -1158,7 +1417,7 @@ void Game::update() {
         if (note.state == NoteState::Holding && note.isHold) {
             // Process hold note ticks (every 100ms)
             // ScoreV1: ticks only affect combo, not score
-            if (laneKeyDown[note.lane] && currentTime <= note.endTime && currentTime >= note.time) {
+            if (laneKeyDown[note.lane] && currentTime <= note.endTime && currentTime >= note.time && note.nextTickTime != INT64_MAX) {
                 while (note.nextTickTime + 100 <= currentTime) {
                     note.nextTickTime += 100;
                     combo++;
@@ -1213,6 +1472,9 @@ void Game::update() {
 
     if (settings.lowSpecMode && hitErrors.size() > 20) {
         hitErrors.erase(hitErrors.begin(), hitErrors.begin() + (hitErrors.size() - 20));
+    } else if (hitErrors.size() > 500) {
+        // Limit hitErrors size to prevent performance degradation
+        hitErrors.erase(hitErrors.begin(), hitErrors.begin() + (hitErrors.size() - 500));
     }
 }
 
@@ -1256,23 +1518,83 @@ void Game::render() {
         float btnW = 200, btnH = 50;
         float btnX = (1280 - btnW) / 2;
         float btnY = 320;
-        if (renderer.renderButton("Select Beatmap", btnX, btnY, btnW, btnH, mouseX, mouseY, mouseClicked)) {
-            replayMode = false;
-            scanSongsFolder();
-            selectedSongIndex = 0;
-            songSelectScroll = 0.0f;
-            if (!songList.empty()) {
-                loadSongBackground(0);
-                playPreviewMusic(0);
+
+        // Only allow Select Beatmap if there are songs
+        if (!songList.empty()) {
+            if (renderer.renderButton("Select Beatmap", btnX, btnY, btnW, btnH, mouseX, mouseY, mouseClicked)) {
+                replayMode = false;
+                scanSongsFolder();  // Incremental scan for new/removed songs
+                selectedSongIndex = 0;
+                songSelectScroll = 0.0f;
+                if (!songList.empty()) {
+                    loadSongBackground(0);
+                    playPreviewMusic(0);
+                }
+                state = GameState::SongSelect;
             }
-            state = GameState::SongSelect;
+        } else {
+            // Render disabled button (no click handling)
+            renderer.renderButton("Select Beatmap", btnX, btnY, btnW, btnH, -1, -1, false);
+            // Show warning message
+            renderer.renderText("No Available Beatmap in Songs Folder.", btnX - 60, btnY + btnH + 60);
         }
         if (renderer.renderButton("Select Replay", btnX, btnY + 60, btnW, btnH, mouseX, mouseY, mouseClicked)) {
             std::string replayPath = openReplayDialog();
             if (!replayPath.empty() && ReplayParser::parse(replayPath, replayInfo)) {
-                std::string beatmapPath = openFileDialog();
+                // Try to find matching beatmap by hash in songs list
+                std::string beatmapPath;
+                for (const auto& song : songList) {
+                    for (const auto& diff : song.difficulties) {
+                        if (diff.hash == replayInfo.beatmapHash) {
+                            beatmapPath = diff.path;
+                            break;
+                        }
+                    }
+                    if (!beatmapPath.empty()) break;
+                }
+
+                // If not found, ask user to select manually
+                if (beatmapPath.empty()) {
+                    beatmapPath = openFileDialog();
+                }
+
                 if (!beatmapPath.empty() && loadBeatmap(beatmapPath)) {
                     replayMode = true;
+                    // Replay mode: only enable AutoPlay if replay has AutoPlay mod (2048)
+                    autoPlay = (replayInfo.mods & 2048) != 0;
+
+                    // Read DT/NC/HT mods from replay
+                    settings.halfTimeEnabled = (replayInfo.mods & 256) != 0;      // HT = 0x100
+                    settings.doubleTimeEnabled = (replayInfo.mods & 64) != 0;     // DT = 0x40
+                    settings.nightcoreEnabled = (replayInfo.mods & 512) != 0;     // NC = 0x200
+                    if (settings.nightcoreEnabled) settings.doubleTimeEnabled = true;
+
+                    // Apply clock rate based on mods
+                    if (settings.halfTimeEnabled) {
+                        clockRate = 0.75;
+                    } else if (settings.doubleTimeEnabled) {
+                        clockRate = 1.5;
+                    } else {
+                        clockRate = 1.0;
+                    }
+                    audio.setPlaybackRate(clockRate);
+                    audio.setChangePitch(settings.nightcoreEnabled);
+
+                    // Recalculate star rating with correct clockRate
+                    currentStarRating = calculateStarRating(beatmap.notes, beatmap.keyCount,
+                        static_cast<StarRatingVersion>(settings.starRatingVersion), clockRate);
+
+                    // Reinitialize PP calculator with correct star rating
+                    ppCalculator.init(totalNotes, currentStarRating);
+
+                    // Rescale judgement windows by clockRate
+                    judgeMarvelous = judgeMarvelous * clockRate;
+                    judgePerfect = judgePerfect * clockRate;
+                    judgeGreat = judgeGreat * clockRate;
+                    judgeGood = judgeGood * clockRate;
+                    judgeBad = judgeBad * clockRate;
+                    judgeMiss = judgeMiss * clockRate;
+
                     currentReplayFrame = 0;
                     state = GameState::Playing;
                     musicStarted = false;
@@ -1373,8 +1695,9 @@ void Game::render() {
 
             // Render song row if visible
             if (y >= -rowHeight && y <= 720) {
-                // Mouse click on song row
-                if (mouseClicked && !songSelectTransition) {
+                // Mouse click on song row (only if not dragging)
+                bool isDragging = std::abs(mouseY - songSelectDragStartY) > 5;
+                if (mouseClicked && !songSelectTransition && !isDragging) {
                     if (mouseX >= panelX && mouseX < panelX + panelW &&
                         mouseY >= y && mouseY < y + rowHeight) {
                         if (isSelected && selectedDifficultyIndex == 0) {
@@ -1421,8 +1744,9 @@ void Game::render() {
                     float diffY = currentY - songSelectScroll;
 
                     if (diffY >= -diffRowHeight && diffY <= 720) {
-                        // Mouse click on difficulty row
-                        if (mouseClicked && !songSelectTransition) {
+                        // Mouse click on difficulty row (only if not dragging)
+                        bool isDragging = std::abs(mouseY - songSelectDragStartY) > 5;
+                        if (mouseClicked && !songSelectTransition && !isDragging) {
                             if (mouseX >= panelX && mouseX < panelX + panelW &&
                                 mouseY >= diffY && mouseY < diffY + diffRowHeight) {
                                 if (selectedDifficultyIndex == d) {
@@ -1450,59 +1774,9 @@ void Game::render() {
                             SDL_RenderFillRect(renderer.getRenderer(), &diffHighlight);
                         }
 
-                        // Extract difficulty name from filename
-                        std::string diffName = song.beatmapFiles[d];
-                        size_t lastSlash = diffName.find_last_of("/\\");
-                        if (lastSlash != std::string::npos) {
-                            diffName = diffName.substr(lastSlash + 1);
-                        }
-                        // Remove extension
-                        size_t dotPos = diffName.rfind('.');
-                        if (dotPos != std::string::npos) {
-                            diffName = diffName.substr(0, dotPos);
-                        }
+                        // Use DifficultyInfo if available
+                        std::string diffName = formatDifficultyName(song, d, settings.starRatingVersion);
 
-                        // For DJMAX, format as "4B Normal" etc.
-                        if (song.source == BeatmapSource::DJMax) {
-                            std::string lower = diffName;
-                            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-
-                            std::string keyStr = "";
-                            if (lower.find("_8b_") != std::string::npos) keyStr = "8B";
-                            else if (lower.find("_6b_") != std::string::npos) keyStr = "6B";
-                            else if (lower.find("_5b_") != std::string::npos) keyStr = "5B";
-                            else if (lower.find("_4b_") != std::string::npos) keyStr = "4B";
-
-                            std::string diffStr = "";
-                            if (lower.find("_sc") != std::string::npos) diffStr = "SC";
-                            else if (lower.find("_mx") != std::string::npos) diffStr = "Maximum";
-                            else if (lower.find("_hd") != std::string::npos) diffStr = "Hard";
-                            else if (lower.find("_nm") != std::string::npos) diffStr = "Normal";
-
-                            if (!keyStr.empty() && !diffStr.empty()) {
-                                diffName = keyStr + " " + diffStr;
-                            }
-                        }
-
-                        // For O2Jam, show Easy/Normal/Hard with level
-                        if (song.source == BeatmapSource::O2Jam) {
-                            // Format: path.ojn:difficulty:level
-                            size_t lastColon = diffName.rfind(':');
-                            if (lastColon != std::string::npos) {
-                                std::string levelStr = diffName.substr(lastColon + 1);
-                                size_t secondColon = diffName.rfind(':', lastColon - 1);
-                                if (secondColon != std::string::npos) {
-                                    std::string diffIdx = diffName.substr(secondColon + 1, lastColon - secondColon - 1);
-                                    std::string diffLabel;
-                                    if (diffIdx == "0") diffLabel = "Easy";
-                                    else if (diffIdx == "1") diffLabel = "Normal";
-                                    else if (diffIdx == "2") diffLabel = "Hard";
-                                    diffName = diffLabel + " Lv." + levelStr;
-                                }
-                            }
-                        }
-
-                        // Render with indent
                         renderer.renderText(diffName.c_str(), (float)panelX + 50, diffY + 8);
                     }
 
@@ -1540,8 +1814,11 @@ void Game::render() {
             std::string savePath = saveReplayDialog();
             if (!savePath.empty()) {
                 // Determine player name for export
+                // AutoPlay forces player name to "Mr.AutoPlay"
                 std::string exportPlayerName;
-                if (replayMode && !settings.forceOverrideUsername) {
+                if (autoPlay) {
+                    exportPlayerName = "Mr.AutoPlay";
+                } else if (replayMode && !settings.forceOverrideUsername) {
                     exportPlayerName = replayInfo.playerName;
                 } else {
                     exportPlayerName = settings.username;
@@ -1585,24 +1862,46 @@ void Game::render() {
 
         float contentX = winX + 180;
         float contentY = winY + 60;
+        float contentW = 600;
+        float contentH = 390;
+
+        // Reset scroll when changing category
+        static SettingsCategory lastCategory = settingsCategory;
+        if (lastCategory != settingsCategory) {
+            settingsScroll = 0;
+            lastCategory = settingsCategory;
+        }
+
+        // Set clip rect for scrollable content area
+        SDL_Rect clipRect = {(int)contentX, (int)contentY, (int)contentW, (int)contentH};
+        SDL_SetRenderClipRect(renderer.getRenderer(), &clipRect);
+
+        // Apply scroll offset to contentY
+        float scrolledY = contentY - settingsScroll;
 
         if (settingsCategory == SettingsCategory::Sound) {
             auto devices = audio.getAudioDevices();
             std::vector<const char*> deviceNames;
             for (const auto& d : devices) deviceNames.push_back(d.c_str());
             settings.audioDevice = renderer.renderDropdown("Output Device", deviceNames.data(), (int)deviceNames.size(),
-                                                            settings.audioDevice, contentX, contentY, 300, mouseX, mouseY, mouseClicked, dropdownExpanded);
+                                                            settings.audioDevice, contentX, scrolledY, 300, mouseX, mouseY, mouseClicked, dropdownExpanded);
 
-            renderer.renderLabel("Volume", contentX, contentY + 80);
-            settings.volume = renderer.renderSliderWithValue(contentX + 80, contentY + 80, 200, settings.volume, 0, 100, mouseX, mouseY, mouseDown);
+            renderer.renderLabel("Volume", contentX, scrolledY + 80);
+            settings.volume = renderer.renderSliderWithValue(contentX + 80, scrolledY + 80, 200, settings.volume, 0, 100, mouseX, mouseY, mouseDown);
             audio.setVolume(settings.volume);
+
+            renderer.renderLabel("Audio Offset", contentX, scrolledY + 120);
+            settings.audioOffset = renderer.renderSliderWithValue(contentX + 120, scrolledY + 120, 200, settings.audioOffset, -300, 300, mouseX, mouseY, mouseDown);
+            char offsetStr[16];
+            snprintf(offsetStr, sizeof(offsetStr), "%dms", settings.audioOffset);
+            renderer.renderLabel(offsetStr, contentX + 330, scrolledY + 120);
         }
         else if (settingsCategory == SettingsCategory::Input) {
             // Key count dropdown
             const char* keyCounts[] = {"1K", "2K", "3K", "4K", "5K", "6K", "7K", "8K", "9K", "10K"};
             int oldKeyCount = settings.selectedKeyCount;
             settings.selectedKeyCount = renderer.renderDropdown(nullptr, keyCounts, 10,
-                settings.selectedKeyCount - 1, contentX, contentY, 80, mouseX, mouseY, mouseClicked, keyCountDropdownExpanded) + 1;
+                settings.selectedKeyCount - 1, contentX, scrolledY, 80, mouseX, mouseY, mouseClicked, keyCountDropdownExpanded) + 1;
 
             // Update defaults when key count changes
             if (oldKeyCount != settings.selectedKeyCount) {
@@ -1615,7 +1914,7 @@ void Game::render() {
             }
 
             // Set Keys button
-            if (renderer.renderButton("Set Keys", contentX + 100, contentY, 100, 35, mouseX, mouseY, mouseClicked)) {
+            if (renderer.renderButton("Set Keys", contentX + 100, scrolledY, 100, 35, mouseX, mouseY, mouseClicked)) {
                 keyBindingIndex = 0;
                 renderer.setKeyCount(settings.selectedKeyCount);
                 state = GameState::KeyBinding;
@@ -1626,12 +1925,12 @@ void Game::render() {
                 bool oldN1 = settings.n1Style;
                 bool oldMirror = settings.mirror;
 
-                if (renderer.renderCheckbox("N+1 Style", settings.n1Style, contentX + 220, contentY, mouseX, mouseY, mouseClicked)) {
+                if (renderer.renderCheckbox("N+1 Style", settings.n1Style, contentX + 220, scrolledY, mouseX, mouseY, mouseClicked)) {
                     settings.n1Style = !settings.n1Style;
                 }
 
                 if (settings.n1Style) {
-                    if (renderer.renderCheckbox("Mirror", settings.mirror, contentX + 340, contentY, mouseX, mouseY, mouseClicked)) {
+                    if (renderer.renderCheckbox("Mirror", settings.mirror, contentX + 340, scrolledY, mouseX, mouseY, mouseClicked)) {
                         settings.mirror = !settings.mirror;
                     }
                 }
@@ -1662,7 +1961,7 @@ void Game::render() {
             // Lane color settings (to the right of dropdown)
             if (!keyCountDropdownExpanded) {
                 float colorX = contentX + 250;  // Right side of dropdown
-                float colorY = contentY;
+                float colorY = scrolledY;
                 renderer.renderLabel("Lane Colors:", colorX, colorY);
                 colorY += 30;
 
@@ -1691,7 +1990,7 @@ void Game::render() {
             const char* resolutions[] = {"1280x720", "1920x1080", "2560x1440"};
             int oldRes = settings.resolution;
             settings.resolution = renderer.renderDropdown("Resolution", resolutions, 3, settings.resolution,
-                                                           contentX, contentY, 180, mouseX, mouseY, mouseClicked, resolutionDropdownExpanded);
+                                                           contentX, scrolledY, 180, mouseX, mouseY, mouseClicked, resolutionDropdownExpanded);
             if (oldRes != settings.resolution) {
                 int widths[] = {1280, 1920, 2560};
                 int heights[] = {720, 1080, 1440};
@@ -1701,13 +2000,13 @@ void Game::render() {
             const char* refreshRates[] = {"30 FPS", "60 FPS", "120 FPS", "200 FPS", "1000 FPS"};
             int oldRefresh = settings.refreshRate;
             settings.refreshRate = renderer.renderDropdown("Refresh Rate", refreshRates, 5, settings.refreshRate,
-                                                            contentX + 220, contentY, 150, mouseX, mouseY, mouseClicked, refreshRateDropdownExpanded);
+                                                            contentX + 220, scrolledY, 150, mouseX, mouseY, mouseClicked, refreshRateDropdownExpanded);
             if (oldRefresh != settings.refreshRate) {
                 int delays[] = {33, 16, 8, 5, 1};
                 targetFrameDelay = delays[settings.refreshRate];
             }
 
-            float row2Y = contentY + 210;
+            float row2Y = scrolledY + 210;
             if (renderer.renderCheckbox("V-Sync", settings.vsync, contentX, row2Y, mouseX, mouseY, mouseClicked)) {
                 settings.vsync = !settings.vsync;
                 renderer.setVSync(settings.vsync);
@@ -1741,11 +2040,16 @@ void Game::render() {
             renderer.renderLabel("Scroll Speed (1-40)", contentX, row4Y);
 
             // Text input for scroll speed (to the right of label, same line)
-            if (renderer.renderTextInput(nullptr, scrollSpeedInput, contentX + 210, row4Y - 5, 50, mouseX, mouseY, mouseClicked, editingScrollSpeed)) {
-                // Input field was clicked
-                if (editingScrollSpeed && scrollSpeedInput.empty()) {
-                    scrollSpeedInput = std::to_string(settings.scrollSpeed);
-                }
+            bool wasEditing = editingScrollSpeed;
+            renderer.renderTextInput(nullptr, scrollSpeedInput, contentX + 210, row4Y - 5, 50, mouseX, mouseY, mouseClicked, editingScrollSpeed);
+
+            // Handle text input start/stop
+            if (editingScrollSpeed && !wasEditing) {
+                // Just started editing - initialize with current value
+                scrollSpeedInput = std::to_string(settings.scrollSpeed);
+                SDL_StartTextInput(renderer.getWindow());
+            } else if (!editingScrollSpeed && wasEditing) {
+                SDL_StopTextInput(renderer.getWindow());
             }
 
             // Initialize input string if not editing
@@ -1757,7 +2061,11 @@ void Game::render() {
             if (!editingScrollSpeed && !scrollSpeedInput.empty()) {
                 try {
                     int newSpeed = std::stoi(scrollSpeedInput);
-                    settings.scrollSpeed = std::max(1, std::min(40, newSpeed));
+                    if (settings.unlimitedSpeed) {
+                        settings.scrollSpeed = std::max(1, newSpeed);
+                    } else {
+                        settings.scrollSpeed = std::max(1, std::min(40, newSpeed));
+                    }
                     scrollSpeedInput = std::to_string(settings.scrollSpeed);
                 } catch (...) {
                     scrollSpeedInput = std::to_string(settings.scrollSpeed);
@@ -1767,6 +2075,11 @@ void Game::render() {
             // BPM Scale checkbox (to the right of input)
             if (renderer.renderCheckbox("BPM Scale", settings.bpmScaleMode, contentX + 280, row4Y, mouseX, mouseY, mouseClicked)) {
                 settings.bpmScaleMode = !settings.bpmScaleMode;
+            }
+
+            // Fun Mode checkbox (to the right of BPM Scale) - unlocks scroll speed limit
+            if (renderer.renderCheckbox("Fun Mode", settings.unlimitedSpeed, contentX + 420, row4Y, mouseX, mouseY, mouseClicked)) {
+                settings.unlimitedSpeed = !settings.unlimitedSpeed;
             }
 
             // Skin selection
@@ -1789,18 +2102,24 @@ void Game::render() {
                     skinManager.unloadSkin();
                 }
             }
+
+            // Background Dim slider
+            float row6Y = row5Y + 40;
+            renderer.renderLabel("Background Dim", contentX, row6Y);
+            settings.backgroundDim = renderer.renderSliderWithValue(contentX + 150, row6Y, 200,
+                settings.backgroundDim, 0, 100, mouseX, mouseY, mouseDown);
         }
         else if (settingsCategory == SettingsCategory::Judgement) {
             const char* judgeModes[] = {"Beatmap OD", "Custom OD", "Custom Windows"};
             int modeIdx = static_cast<int>(settings.judgeMode);
-            int newMode = renderer.renderDropdown("Judge Mode", judgeModes, 3, modeIdx, contentX, contentY, 200, mouseX, mouseY, mouseClicked, judgeModeDropdownExpanded);
+            int newMode = renderer.renderDropdown("Judge Mode", judgeModes, 3, modeIdx, contentX, scrolledY, 200, mouseX, mouseY, mouseClicked, judgeModeDropdownExpanded);
             settings.judgeMode = static_cast<JudgementMode>(newMode);
 
-            if (renderer.renderCheckbox("NoteLock", settings.noteLock, contentX + 220, contentY, mouseX, mouseY, mouseClicked)) {
+            if (renderer.renderCheckbox("NoteLock", settings.noteLock, contentX + 220, scrolledY, mouseX, mouseY, mouseClicked)) {
                 settings.noteLock = !settings.noteLock;
             }
 
-            float modeContentY = contentY + 150;
+            float modeContentY = scrolledY + 150;
             if (settings.judgeMode == JudgementMode::CustomOD) {
                 renderer.renderLabel("OD Value", contentX, modeContentY);
                 int odInt = (int)(settings.customOD * 10);
@@ -1854,52 +2173,81 @@ void Game::render() {
             settings.hitErrorBarScale = scaleInt / 100.0f;
         }
         else if (settingsCategory == SettingsCategory::Modifiers) {
-            renderer.renderLabel("Game Modifiers", contentX, contentY);
+            renderer.renderLabel("Game Modifiers", contentX, scrolledY);
             if (renderer.renderCheckbox("AutoPlay", settings.autoPlayEnabled,
-                                         contentX, contentY + 30, mouseX, mouseY, mouseClicked)) {
+                                         contentX, scrolledY + 30, mouseX, mouseY, mouseClicked)) {
                 settings.autoPlayEnabled = !settings.autoPlayEnabled;
             }
             if (renderer.renderCheckbox("Hidden", settings.hiddenEnabled,
-                                         contentX, contentY + 60, mouseX, mouseY, mouseClicked)) {
+                                         contentX, scrolledY + 60, mouseX, mouseY, mouseClicked)) {
                 settings.hiddenEnabled = !settings.hiddenEnabled;
                 // Hidden and FadeIn are mutually exclusive
                 if (settings.hiddenEnabled) settings.fadeInEnabled = false;
             }
-            renderer.renderText("Notes fade out near judge line", contentX + 20, contentY + 90);
+            renderer.renderText("Notes fade out near judge line", contentX + 20, scrolledY + 90);
             if (renderer.renderCheckbox("FadeIn", settings.fadeInEnabled,
-                                         contentX, contentY + 120, mouseX, mouseY, mouseClicked)) {
+                                         contentX, scrolledY + 120, mouseX, mouseY, mouseClicked)) {
                 settings.fadeInEnabled = !settings.fadeInEnabled;
                 // Hidden and FadeIn are mutually exclusive
                 if (settings.fadeInEnabled) settings.hiddenEnabled = false;
             }
-            renderer.renderText("Notes fade in from top", contentX + 20, contentY + 150);
+            renderer.renderText("Notes fade in from top", contentX + 20, scrolledY + 150);
             if (renderer.renderCheckbox("IgnoreSV", settings.ignoreSV,
-                                         contentX, contentY + 180, mouseX, mouseY, mouseClicked)) {
+                                         contentX, scrolledY + 180, mouseX, mouseY, mouseClicked)) {
                 settings.ignoreSV = !settings.ignoreSV;
             }
-            renderer.renderText("Ignore scroll velocity changes", contentX + 20, contentY + 210);
+            renderer.renderText("Ignore scroll velocity changes", contentX + 20, scrolledY + 210);
             if (renderer.renderCheckbox("Death", settings.deathEnabled,
-                                         contentX, contentY + 240, mouseX, mouseY, mouseClicked)) {
+                                         contentX, scrolledY + 240, mouseX, mouseY, mouseClicked)) {
                 settings.deathEnabled = !settings.deathEnabled;
             }
-            renderer.renderText("HP=0 causes death", contentX + 20, contentY + 270);
+            renderer.renderText("HP=0 causes death", contentX + 20, scrolledY + 270);
             if (renderer.renderCheckbox("Sudden Death", settings.suddenDeathEnabled,
-                                         contentX, contentY + 300, mouseX, mouseY, mouseClicked)) {
+                                         contentX, scrolledY + 300, mouseX, mouseY, mouseClicked)) {
                 settings.suddenDeathEnabled = !settings.suddenDeathEnabled;
             }
-            renderer.renderText("Any miss causes instant death", contentX + 20, contentY + 330);
+            renderer.renderText("Any miss causes instant death", contentX + 20, scrolledY + 330);
+
+            // Speed modifiers
+            renderer.renderLabel("Speed Modifiers", contentX, scrolledY + 370);
+            if (renderer.renderCheckbox("Double Time", settings.doubleTimeEnabled,
+                                         contentX, scrolledY + 400, mouseX, mouseY, mouseClicked)) {
+                settings.doubleTimeEnabled = !settings.doubleTimeEnabled;
+                if (settings.doubleTimeEnabled) settings.halfTimeEnabled = false;
+            }
+            renderer.renderText("1.5x speed", contentX + 20, scrolledY + 430);
+
+            if (renderer.renderCheckbox("Nightcore", settings.nightcoreEnabled,
+                                         contentX, scrolledY + 460, mouseX, mouseY, mouseClicked)) {
+                settings.nightcoreEnabled = !settings.nightcoreEnabled;
+                if (settings.nightcoreEnabled) {
+                    settings.doubleTimeEnabled = true;  // NC auto-enables DT
+                    settings.halfTimeEnabled = false;
+                }
+            }
+            renderer.renderText("1.5x speed + pitch up", contentX + 20, scrolledY + 490);
+
+            if (renderer.renderCheckbox("Half Time", settings.halfTimeEnabled,
+                                         contentX, scrolledY + 520, mouseX, mouseY, mouseClicked)) {
+                settings.halfTimeEnabled = !settings.halfTimeEnabled;
+                if (settings.halfTimeEnabled) {
+                    settings.doubleTimeEnabled = false;
+                    settings.nightcoreEnabled = false;
+                }
+            }
+            renderer.renderText("0.75x speed, 0.5x score", contentX + 20, scrolledY + 550);
         }
         else if (settingsCategory == SettingsCategory::Misc) {
-            renderer.renderLabel("Hold Note Judgement", contentX, contentY);
+            renderer.renderLabel("Hold Note Judgement", contentX, scrolledY);
             if (renderer.renderCheckbox("ScoreV1", settings.legacyHoldJudgement,
-                                         contentX, contentY + 30, mouseX, mouseY, mouseClicked)) {
+                                         contentX, scrolledY + 30, mouseX, mouseY, mouseClicked)) {
                 settings.legacyHoldJudgement = !settings.legacyHoldJudgement;
             }
-            renderer.renderText("Check: ScoreV1 algorithm", contentX + 20, contentY + 60);
-            renderer.renderText("Uncheck: ScoreV2 algorithm", contentX + 20, contentY + 80);
+            renderer.renderText("Check: ScoreV1 algorithm", contentX + 20, scrolledY + 60);
+            renderer.renderText("Uncheck: ScoreV2 algorithm", contentX + 20, scrolledY + 80);
 
             // Username input
-            float usernameY = contentY + 120;
+            float usernameY = scrolledY + 120;
             renderer.renderTextInput("Username", settings.username, contentX, usernameY, 200,
                                      mouseX, mouseY, mouseClicked, editingUsername);
 
@@ -1915,6 +2263,15 @@ void Game::render() {
             if (renderer.renderCheckbox("Enable Debug Logging", settings.debugEnabled,
                                          contentX, debugY + 30, mouseX, mouseY, mouseClicked)) {
                 settings.debugEnabled = !settings.debugEnabled;
+#ifdef _WIN32
+                if (settings.debugEnabled) {
+                    AllocConsole();
+                    freopen("CONOUT$", "w", stdout);
+                    freopen("CONOUT$", "w", stderr);
+                } else {
+                    FreeConsole();
+                }
+#endif
             }
             renderer.renderText("When enabled, Export Log button appears in result screen", contentX + 20, debugY + 60);
 
@@ -1932,6 +2289,28 @@ void Game::render() {
                                          contentX, skinY + 60, mouseX, mouseY, mouseClicked)) {
                 settings.disableStoryboard = !settings.disableStoryboard;
             }
+
+            // Star Rating Version dropdown
+            float starY = skinY + 110;
+            renderer.renderLabel("Star Rating Version", contentX, starY);
+            const char* starVersions[] = {"b20260101", "b20220101"};
+            settings.starRatingVersion = renderer.renderDropdown(nullptr, starVersions, 2,
+                settings.starRatingVersion, contentX, starY + 30, 150, mouseX, mouseY, mouseClicked, starRatingDropdownExpanded);
+        }
+
+        // Reset clip rect before rendering Close button
+        SDL_SetRenderClipRect(renderer.getRenderer(), nullptr);
+
+        // Clear Index button
+        if (renderer.renderButton("Clear Index", winX + 800 - 208, winY + 500 - 45, 116, 30, mouseX, mouseY, mouseClicked)) {
+            // Delete all index files
+            std::string indexDir = SongIndex::getIndexDir();
+            if (std::filesystem::exists(indexDir)) {
+                std::filesystem::remove_all(indexDir);
+            }
+            // Rebuild index immediately
+            songList.clear();
+            scanSongsFolder();
         }
 
         if (renderer.renderButton("Close", winX + 800 - 80, winY + 500 - 45, 60, 30, mouseX, mouseY, mouseClicked)) {
@@ -1957,12 +2336,20 @@ void Game::render() {
         }
         // For keysound-only maps, use system time instead of audio position
         int64_t currentTime;
-        if (!musicStarted) {
-            currentTime = elapsed - PREPARE_TIME;
+        if (state == GameState::Paused) {
+            // Use saved game time when paused
+            currentTime = pauseGameTime;
+        } else if (!musicStarted) {
+            currentTime = static_cast<int64_t>((elapsed - PREPARE_TIME) * clockRate);
         } else if (hasBackgroundMusic) {
-            currentTime = audio.getPosition();
+            // When dead, use frozen time instead of audio position
+            if (state == GameState::Dead) {
+                currentTime = static_cast<int64_t>((elapsed - PREPARE_TIME) * clockRate);
+            } else {
+                currentTime = audio.getPosition() + settings.audioOffset;
+            }
         } else {
-            currentTime = elapsed - PREPARE_TIME;
+            currentTime = static_cast<int64_t>((elapsed - PREPARE_TIME) * clockRate);
         }
 
         // Update and render storyboard background
@@ -1971,21 +2358,79 @@ void Game::render() {
         storyboard.renderBackground(renderer.getRenderer());
         storyboard.render(renderer.getRenderer(), StoryboardLayer::Background, isPassing);
 
-        // Layer 1: Background (lanes, stage bottom, judge line)
-        renderer.renderLanes();
-        renderer.renderStageBottom();
-        if (settings.laneLight) {
-            renderer.renderLaneHighlights(laneKeyDown, beatmap.keyCount, settings.hiddenEnabled, settings.fadeInEnabled, combo);
+        // Apply background dim
+        if (settings.backgroundDim > 0) {
+            int winW, winH;
+            SDL_GetWindowSize(renderer.getWindow(), &winW, &winH);
+            SDL_SetRenderDrawBlendMode(renderer.getRenderer(), SDL_BLENDMODE_BLEND);
+            int dimAlpha = (int)(settings.backgroundDim * 255 / 100);
+            SDL_SetRenderDrawColor(renderer.getRenderer(), 0, 0, 0, dimAlpha);
+            SDL_FRect dimRect = {0, 0, (float)winW, (float)winH};
+            SDL_RenderFillRect(renderer.getRenderer(), &dimRect);
         }
-        renderer.renderJudgeLine();
 
-        // Layer 2: Keys
-        renderer.renderStageBorders();
-        renderer.renderKeys(laneKeyDown, beatmap.keyCount);
+        // Layer 1: Background (lanes)
+        renderer.renderLanes();
+
+        // Layer 2: Lane light effect (below notes)
+        if (settings.laneLight) {
+            // Replay mode ignores Hidden/FadeIn mods
+            bool useHidden = settings.hiddenEnabled && !replayMode;
+            bool useFadeIn = settings.fadeInEnabled && !replayMode;
+            renderer.renderLaneHighlights(laneKeyDown, beatmap.keyCount, useHidden, useFadeIn, combo);
+        }
+
+        // Layer 3: mania-stage-light (below notes, stage bottom, keys)
         renderer.renderHitLighting(laneKeyDown, beatmap.keyCount);
 
-        // Layer 3: Notes (top layer)
-        renderer.renderNotes(beatmap.notes, currentTime, settings.scrollSpeed, baseBPM, settings.bpmScaleMode, beatmap.timingPoints, settings.laneColors, settings.hiddenEnabled, settings.fadeInEnabled, combo, settings.ignoreSV);
+        // Check if skin has custom keyImage
+        bool hasCustomKeys = skinManager.hasCustomKeyImage(beatmap.keyCount);
+
+        // Build laneHoldActive array for LightingL
+        bool laneHoldActive[18] = {false};
+        for (const auto& note : beatmap.notes) {
+            if (note.state == NoteState::Holding && note.lane < 18) {
+                laneHoldActive[note.lane] = true;
+            }
+        }
+
+        // Track if any hold is active for combo color
+        bool wasHoldActive = anyHoldActive;
+        anyHoldActive = false;
+        for (int i = 0; i < 18; i++) {
+            if (laneHoldActive[i]) {
+                anyHoldActive = true;
+                break;
+            }
+        }
+        // Detect hold state change for color transition
+        if (anyHoldActive != wasHoldActive) {
+            holdColorChangeTime = now;
+        }
+
+        // Replay mode ignores Hidden/FadeIn mods
+        bool useHidden = settings.hiddenEnabled && !replayMode;
+        bool useFadeIn = settings.fadeInEnabled && !replayMode;
+
+        if (hasCustomKeys) {
+            // Custom keyImage: Keys below notes
+            renderer.renderKeys(laneKeyDown, beatmap.keyCount);
+            renderer.renderNotes(beatmap.notes, currentTime, settings.scrollSpeed, baseBPM, settings.bpmScaleMode, beatmap.timingPoints, settings.laneColors, useHidden, useFadeIn, combo, settings.ignoreSV, clockRate);
+        } else {
+            // Default keyImage: Notes below keys
+            renderer.renderNotes(beatmap.notes, currentTime, settings.scrollSpeed, baseBPM, settings.bpmScaleMode, beatmap.timingPoints, settings.laneColors, useHidden, useFadeIn, combo, settings.ignoreSV, clockRate);
+            renderer.renderKeys(laneKeyDown, beatmap.keyCount);
+        }
+
+        // Layer 5: Stage bottom (above notes)
+        renderer.renderStageBottom();
+        renderer.renderJudgeLine();
+
+        // Layer 6: LightingN/LightingL (above stage bottom)
+        renderer.renderNoteLighting(laneHoldActive, beatmap.keyCount, currentTime);
+
+        // Layer 7: Stage borders
+        renderer.renderStageBorders();
 
         // Storyboard Foreground layer
         storyboard.render(renderer.getRenderer(), StoryboardLayer::Foreground, isPassing);
@@ -2003,7 +2448,7 @@ void Game::render() {
         storyboard.render(renderer.getRenderer(), StoryboardLayer::Overlay, isPassing);
 
         // UI elements (above Overlay)
-        renderer.renderSpeedInfo(settings.scrollSpeed, settings.bpmScaleMode, autoPlay);
+        renderer.renderSpeedInfo(settings.scrollSpeed, settings.bpmScaleMode, autoPlay, settings.autoPlayEnabled);
         if (replayMode) {
             renderer.renderText("[REPLAY]", 20, 30);
             renderer.renderScorePanel(replayInfo.playerName.c_str(), score, calculateAccuracy(), maxCombo);
@@ -2014,10 +2459,37 @@ void Game::render() {
         renderer.renderFPS(fps);
         renderer.renderGameInfo(currentTime, totalTime, judgementCounts, calculateAccuracy(), score);
 
+        // Performance monitoring (debug mode only)
+        if (settings.debugEnabled) {
+            char perfText[128];
+
+            // Judgement windows display
+            snprintf(perfText, sizeof(perfText), "Windows: %.1f/%.1f/%.1f/%.1f/%.1f/%.1f",
+                judgeMarvelous, judgePerfect, judgeGreat, judgeGood, judgeBad, judgeMiss);
+            renderer.renderText(perfText, 20, 575);
+
+            snprintf(perfText, sizeof(perfText), "Input: %.2fms", perfInput);
+            renderer.renderText(perfText, 20, 595);
+            snprintf(perfText, sizeof(perfText), "Update: %.2fms", perfUpdate);
+            renderer.renderText(perfText, 20, 615);
+            snprintf(perfText, sizeof(perfText), "Draw: %.2fms", perfDraw);
+            renderer.renderText(perfText, 20, 635);
+        }
+
+        // Star rating display (above PP)
+        char starText[32];
+        snprintf(starText, sizeof(starText), "Star: %.2f", currentStarRating);
+        renderer.renderText(starText, 20, 655);
+
+        // PP display (bottom left of play area)
+        std::string ppText = std::to_string(ppCalculator.getCurrentPP()) + " PP";
+        renderer.renderText(ppText.c_str(), 20, 680);
+
         // Combo (above Overlay)
         int64_t comboAnimTime = now - lastComboChangeTime;
         int64_t breakAnimTime = now - comboBreakTime;
-        renderer.renderCombo(combo, comboAnimTime, comboBreak, breakAnimTime);
+        int64_t holdColorElapsed = now - holdColorChangeTime;
+        renderer.renderCombo(combo, comboAnimTime, comboBreak, breakAnimTime, lastComboValue, anyHoldActive, holdColorElapsed);
 
         // Menus (topmost)
         if (state == GameState::Paused) {
@@ -2059,9 +2531,12 @@ Judgement Game::checkJudgement(int lane, int64_t atTime) {
             // osu! DOES reset tick time on recovery (method_12 sets int_10 = currentTime)
             note.state = NoteState::Holding;
             note.nextTickTime = currentTime;  // Reset tick timer on recovery
+            // DO NOT reset headReleaseTime - head should keep falling
+            SDL_Log("HOLD_RECOVER: lane=%d headReleaseTime=%lld", lane, (long long)note.headReleaseTime);
             addDebugLog(currentTime, "HOLD_RECOVER", lane,
                 "noteTime=" + std::to_string(note.time) + " endTime=" + std::to_string(note.endTime) +
-                " nextTickTime=" + std::to_string(note.nextTickTime));
+                " nextTickTime=" + std::to_string(note.nextTickTime) +
+                " headReleaseTime=" + std::to_string(note.headReleaseTime));
             return Judgement::None;
         }
     }
@@ -2083,9 +2558,13 @@ Judgement Game::checkJudgement(int lane, int64_t atTime) {
                     note.state = NoteState::Holding;
                     note.headHitError = diff;
                     note.headHit = true;  // Mark head as hit
+                    note.headHitEarly = (currentTime < note.time);  // Early or late hit
                     note.nextTickTime = currentTime;  // Start ticks from hit time
+                    SDL_Log("HOLD_HIT: lane=%d headHitEarly=%d currentTime=%lld noteTime=%lld",
+                        lane, note.headHitEarly ? 1 : 0, (long long)currentTime, (long long)note.time);
                 } else {
                     note.state = NoteState::Hit;
+                    renderer.triggerLightingN(lane, currentTime);
                     Judgement j = getJudgement(diff);
                     processJudgement(j, lane);
                 }
@@ -2111,9 +2590,13 @@ Judgement Game::checkJudgement(int lane, int64_t atTime) {
                     note.state = NoteState::Holding;
                     note.headHitError = diff;
                     note.headHit = true;  // Mark head as hit
+                    note.headHitEarly = (currentTime < note.time);  // Early or late hit
                     note.nextTickTime = currentTime;  // Start ticks from hit time
+                    SDL_Log("HOLD_HIT: lane=%d headHitEarly=%d currentTime=%lld noteTime=%lld",
+                        lane, note.headHitEarly ? 1 : 0, (long long)currentTime, (long long)note.time);
                 } else {
                     note.state = NoteState::Hit;
+                    renderer.triggerLightingN(lane, currentTime);
                     Judgement j = getJudgement(diff);
                     processJudgement(j, lane);
                 }
@@ -2157,6 +2640,15 @@ void Game::onKeyRelease(int lane, int64_t atTime) {
         // Check if release is within tail judgement window
         double tailWindow = judgeBad;
         if (rawTailError <= tailWindow) {
+            // If head was not hit, release in tail window -> Miss
+            if (!note.headHit) {
+                note.state = NoteState::Missed;
+                note.hadComboBreak = true;
+                processJudgement(Judgement::Miss, lane);
+                combo = 0;
+                return;
+            }
+
             // Process remaining ticks before ending hold note
             int64_t tickEndTime = std::min(currentTime, note.endTime);
             while (note.nextTickTime + 100 <= tickEndTime) {
@@ -2169,6 +2661,7 @@ void Game::onKeyRelease(int lane, int64_t atTime) {
 
             // Normal release at tail
             note.state = NoteState::Hit;
+            renderer.triggerLightingN(lane, currentTime);
 
             Judgement j;
             double headError = note.headHitError;
@@ -2233,15 +2726,23 @@ void Game::onKeyRelease(int lane, int64_t atTime) {
             hitErrors.push_back({(int64_t)SDL_GetTicks(), currentTime - note.endTime});
         } else if (currentTime < note.endTime - judgeBad) {
             // Released early (mid-hold) - process ticks up to current time first
-            while (note.nextTickTime + 100 <= currentTime) {
-                note.nextTickTime += 100;
-                combo++;
-                if (combo > maxCombo) maxCombo = combo;
+            if (note.nextTickTime != INT64_MAX) {
+                while (note.nextTickTime + 100 <= currentTime) {
+                    note.nextTickTime += 100;
+                    combo++;
+                    if (combo > maxCombo) maxCombo = combo;
+                }
             }
             // combo break but can recover
             note.state = NoteState::Released;
             note.hadComboBreak = true;
-            note.nextTickTime = INT64_MAX;  // Disable ticks until recovery (osu! sets int_10 = -1)
+            // Only set headReleaseTime on first release - don't reset on subsequent releases
+            if (note.headReleaseTime == 0) {
+                note.headReleaseTime = currentTime;  // Record release time for head falling
+                note.headGrayStartTime = currentTime;  // Start gray transition (60ms) - only on first release
+            }
+            note.nextTickTime = INT64_MAX;  // Disable ticks until recovery
+            SDL_Log("HOLD_EARLY_RELEASE: lane=%d headReleaseTime=%lld", lane, (long long)note.headReleaseTime);
             addDebugLog(currentTime, "HOLD_EARLY_RELEASE", lane,
                 "noteTime=" + std::to_string(note.time) + " endTime=" + std::to_string(note.endTime) +
                 " combo=" + std::to_string(combo) + " maxCombo=" + std::to_string(maxCombo));
@@ -2271,6 +2772,8 @@ void Game::processJudgement(Judgement j, int lane) {
     int idx = static_cast<int>(j) - 1;
     if (idx >= 0 && idx < 6) {
         judgementCounts[idx]++;
+        // Update PP calculator
+        ppCalculator.processJudgement(idx);
     }
 
     lastJudgementText = names[static_cast<int>(j)];
@@ -2281,7 +2784,8 @@ void Game::processJudgement(Judgement j, int lane) {
     hpManager.processJudgement(j);
 
     // Sudden Death: any miss triggers death
-    if (settings.suddenDeathEnabled && j == Judgement::Miss && !autoPlay) {
+    // Replay mode ignores Sudden Death mod
+    if (settings.suddenDeathEnabled && !replayMode && j == Judgement::Miss && !autoPlay) {
         state = GameState::Dead;
         deathTime = getCurrentGameTime();
         deathSlowdown = 1.0f;
@@ -2318,7 +2822,7 @@ void Game::processJudgement(Judgement j, int lane) {
 
         double baseScore = (500000.0 / totalNotes) * (hitValues[idx] / 320.0);
         double bonusScore = (500000.0 / totalNotes) * (hitBonusValues[idx] * sqrt(bonus) / 320.0);
-        scoreAccumulator += baseScore + bonusScore;
+        scoreAccumulator += (baseScore + bonusScore) * scoreMultiplier;  // Apply score multiplier
         score = static_cast<int>(round(scoreAccumulator));
     }
 
@@ -2353,13 +2857,25 @@ void Game::processJudgement(Judgement j, int lane) {
 int64_t Game::getCurrentGameTime() const {
     int64_t elapsed = SDL_GetTicks() - startTime;
     if (!musicStarted) {
-        return elapsed - PREPARE_TIME;
+        return static_cast<int64_t>((elapsed - PREPARE_TIME) * clockRate);
     }
     if (hasBackgroundMusic) {
         return audio.getPosition() + settings.audioOffset;
     }
-    // No background music: use elapsed time
-    return elapsed - PREPARE_TIME;
+    // No background music: use elapsed time scaled by playback rate
+    return static_cast<int64_t>((elapsed - PREPARE_TIME) * clockRate);
+}
+
+int64_t Game::getRenderTime() const {
+    int64_t elapsed = SDL_GetTicks() - startTime;
+    if (!musicStarted) {
+        return static_cast<int64_t>((elapsed - PREPARE_TIME) * clockRate);
+    }
+    if (hasBackgroundMusic) {
+        return audio.getRawPosition();
+    }
+    // No background music: use elapsed time scaled by playback rate
+    return static_cast<int64_t>((elapsed - PREPARE_TIME) * clockRate);
 }
 
 double Game::calculateAccuracy() {
@@ -2418,7 +2934,6 @@ void Game::exportDebugLog() {
 }
 
 void Game::scanSongsFolder() {
-    songList.clear();
     std::string songsPath = "Songs";
 
     if (!fs::exists(songsPath)) {
@@ -2426,38 +2941,275 @@ void Game::scanSongsFolder() {
         return;
     }
 
+    // Collect current folder paths in Songs directory
+    std::set<std::string> currentFolders;
     for (const auto& entry : fs::directory_iterator(songsPath)) {
-        if (!entry.is_directory()) continue;
+        if (entry.is_directory()) {
+            currentFolders.insert(entry.path().string());
+        }
+    }
 
+    // Build set of existing folder paths in songList
+    std::set<std::string> existingFolders;
+    for (const auto& song : songList) {
+        existingFolders.insert(song.folderPath);
+    }
+
+    // Remove songs whose folders no longer exist
+    songList.erase(
+        std::remove_if(songList.begin(), songList.end(),
+            [&currentFolders](const SongEntry& song) {
+                return currentFolders.find(song.folderPath) == currentFolders.end();
+            }),
+        songList.end());
+
+    // Find new folders to scan
+    std::vector<std::string> newFolders;
+    for (const auto& folder : currentFolders) {
+        if (existingFolders.find(folder) == existingFolders.end()) {
+            newFolders.push_back(folder);
+        }
+    }
+
+    // If no new folders, just re-sort and return
+    if (newFolders.empty()) {
+        std::cerr << "[SCAN] No new folders to scan" << std::endl;
+        goto sort_and_return;
+    }
+
+    std::cerr << "[SCAN] Found " << newFolders.size() << " new folders to scan" << std::endl;
+
+    for (const auto& folderPath : newFolders) {
+        fs::path entry(folderPath);
+
+        // Check if we have a valid cached index
+        if (SongIndex::isIndexValid(folderPath)) {
+            CachedSong cached;
+            if (SongIndex::loadIndex(folderPath, cached)) {
+                // Convert cached song to SongEntry
+                SongEntry song;
+                song.folderPath = cached.folderPath;
+                song.folderName = cached.folderName;
+                song.title = cached.title;
+                song.artist = cached.artist;
+                song.backgroundPath = cached.backgroundPath;
+                song.audioPath = cached.audioPath;
+                song.previewTime = cached.previewTime;
+                song.source = static_cast<BeatmapSource>(cached.source);
+
+                std::cerr << "[CACHE] Loading " << cached.title
+                          << " cached.difficulties=" << cached.difficulties.size() << std::endl;
+
+                for (const auto& cd : cached.difficulties) {
+                    song.beatmapFiles.push_back(cd.path);
+                    DifficultyInfo diff;
+                    diff.path = cd.path;
+                    diff.version = cd.version;
+                    diff.creator = cd.creator;
+                    diff.hash = cd.hash;
+                    diff.keyCount = cd.keyCount;
+                    for (int v = 0; v < STAR_RATING_VERSION_COUNT; v++) {
+                        diff.starRatings[v] = cd.starRatings[v];
+                    }
+                    song.difficulties.push_back(diff);
+                }
+
+                std::cerr << "[CACHE] Result: beatmapFiles=" << song.beatmapFiles.size()
+                          << " difficulties=" << song.difficulties.size() << std::endl;
+
+                if (!song.beatmapFiles.empty()) {
+                    // Sort difficulties by star rating (ascending)
+                    std::vector<size_t> indices(song.difficulties.size());
+                    std::iota(indices.begin(), indices.end(), 0);
+                    std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+                        return song.difficulties[a].starRatings[settings.starRatingVersion] <
+                               song.difficulties[b].starRatings[settings.starRatingVersion];
+                    });
+                    std::vector<std::string> sortedFiles;
+                    std::vector<DifficultyInfo> sortedDiffs;
+                    for (size_t i : indices) {
+                        sortedFiles.push_back(song.beatmapFiles[i]);
+                        sortedDiffs.push_back(song.difficulties[i]);
+                    }
+                    song.beatmapFiles = std::move(sortedFiles);
+                    song.difficulties = std::move(sortedDiffs);
+
+                    songList.push_back(song);
+                }
+                continue;  // Skip to next folder
+            }
+        }
+
+        // No valid cache, scan the folder
         SongEntry song;
-        song.folderPath = entry.path().string();
-        song.folderName = entry.path().filename().string();
+        song.folderPath = entry.string();
+        song.folderName = entry.filename().string();
 
         // Scan for beatmap files
-        for (const auto& file : fs::directory_iterator(entry.path())) {
+        for (const auto& file : fs::directory_iterator(entry)) {
             if (!file.is_regular_file()) continue;
             std::string ext = file.path().extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
             if (ext == ".osu") {
-                song.beatmapFiles.push_back(file.path().string());
                 song.source = BeatmapSource::Osu;
+
+                // Parse difficulty info from .osu file
+                DifficultyInfo diff;
+                diff.path = file.path().string();
+                diff.keyCount = 4;  // Default
+                std::ifstream diffFile(file.path().string());
+                std::string diffLine;
+                while (std::getline(diffFile, diffLine)) {
+                    if (diffLine.find("Version:") == 0) {
+                        diff.version = diffLine.substr(8);
+                        while (!diff.version.empty() && diff.version[0] == ' ')
+                            diff.version.erase(0, 1);
+                    } else if (diffLine.find("Creator:") == 0) {
+                        diff.creator = diffLine.substr(8);
+                        while (!diff.creator.empty() && diff.creator[0] == ' ')
+                            diff.creator.erase(0, 1);
+                    } else if (diffLine.find("CircleSize:") == 0) {
+                        std::string val = diffLine.substr(11);
+                        while (!val.empty() && val[0] == ' ') val.erase(0, 1);
+                        try { diff.keyCount = std::stoi(val); } catch (...) {}
+                    } else if (diffLine.find("[Editor]") == 0 || diffLine.find("[Metadata]") == 0) {
+                        // Continue to next section
+                    } else if (diffLine.find("[Difficulty]") == 0) {
+                        // Continue reading
+                    } else if (diffLine.find("[Events]") == 0) {
+                        break;  // Stop at Events section
+                    }
+                }
+
+                // Calculate star ratings for all versions
+                BeatmapInfo tempInfo;
+                if (OsuParser::parse(diff.path, tempInfo)) {
+                    diff.starRatings[0] = calculateStarRating(tempInfo.notes, diff.keyCount,
+                        StarRatingVersion::OsuStable_b20260101);
+                    diff.starRatings[1] = calculateStarRating(tempInfo.notes, diff.keyCount,
+                        StarRatingVersion::OsuStable_b20220101);
+                }
+
+                // Calculate MD5 hash
+                diff.hash = OsuParser::calculateMD5(diff.path);
+
+                // Add both together to keep them in sync
+                song.beatmapFiles.push_back(diff.path);
+                song.difficulties.push_back(diff);
             } else if (ext == ".bytes") {
-                song.beatmapFiles.push_back(file.path().string());
                 song.source = BeatmapSource::DJMax;
+
+                // Parse difficulty info from filename
+                DifficultyInfo diff;
+                diff.path = file.path().string();
+                std::string fname = file.path().filename().string();
+                std::string lower = fname;
+                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+                // Extract key count
+                if (lower.find("_8b_") != std::string::npos) diff.keyCount = 8;
+                else if (lower.find("_6b_") != std::string::npos) diff.keyCount = 6;
+                else if (lower.find("_5b_") != std::string::npos) diff.keyCount = 5;
+                else if (lower.find("_4b_") != std::string::npos) diff.keyCount = 4;
+                else diff.keyCount = 4;
+
+                // Extract difficulty name
+                if (lower.find("_sc") != std::string::npos) diff.version = "SC";
+                else if (lower.find("_mx") != std::string::npos) diff.version = "Maximum";
+                else if (lower.find("_hd") != std::string::npos) diff.version = "Hard";
+                else if (lower.find("_nm") != std::string::npos) diff.version = "Normal";
+                else diff.version = "Normal";
+
+                // Calculate star ratings for all versions
+                BeatmapInfo tempInfo;
+                if (DJMaxParser::parse(diff.path, tempInfo)) {
+                    diff.starRatings[0] = calculateStarRating(tempInfo.notes, diff.keyCount,
+                        StarRatingVersion::OsuStable_b20260101);
+                    diff.starRatings[1] = calculateStarRating(tempInfo.notes, diff.keyCount,
+                        StarRatingVersion::OsuStable_b20220101);
+                }
+
+                // Add both together to keep them in sync
+                song.beatmapFiles.push_back(diff.path);
+                song.difficulties.push_back(diff);
             } else if (ext == ".ojn") {
                 // O2Jam: one file contains 3 difficulties (Easy, Normal, Hard)
                 // Get level info from header
                 OjnHeader header;
-                if (OjnParser::getHeader(file.path().string(), header)) {
-                    // Format: path.ojn:difficulty:level
-                    song.beatmapFiles.push_back(file.path().string() + ":0:" + std::to_string(header.level[0]));
-                    song.beatmapFiles.push_back(file.path().string() + ":1:" + std::to_string(header.level[1]));
-                    song.beatmapFiles.push_back(file.path().string() + ":2:" + std::to_string(header.level[2]));
+                std::string ojnPath = file.path().string();
+                std::string creator;
+                if (OjnParser::getHeader(ojnPath, header)) {
+                    creator = std::string(header.noter, strnlen(header.noter, 32));
+
+                    // Calculate star ratings for each difficulty (all versions)
+                    double starEasy[2] = {0.0, 0.0};
+                    double starNormal[2] = {0.0, 0.0};
+                    double starHard[2] = {0.0, 0.0};
+                    BeatmapInfo tempInfo;
+                    if (OjnParser::parse(ojnPath, tempInfo, OjnDifficulty::Easy)) {
+                        starEasy[0] = calculateStarRating(tempInfo.notes, 7, StarRatingVersion::OsuStable_b20260101);
+                        starEasy[1] = calculateStarRating(tempInfo.notes, 7, StarRatingVersion::OsuStable_b20220101);
+                    }
+                    if (OjnParser::parse(ojnPath, tempInfo, OjnDifficulty::Normal)) {
+                        starNormal[0] = calculateStarRating(tempInfo.notes, 7, StarRatingVersion::OsuStable_b20260101);
+                        starNormal[1] = calculateStarRating(tempInfo.notes, 7, StarRatingVersion::OsuStable_b20220101);
+                    }
+                    if (OjnParser::parse(ojnPath, tempInfo, OjnDifficulty::Hard)) {
+                        starHard[0] = calculateStarRating(tempInfo.notes, 7, StarRatingVersion::OsuStable_b20260101);
+                        starHard[1] = calculateStarRating(tempInfo.notes, 7, StarRatingVersion::OsuStable_b20220101);
+                    }
+
+                    // Build paths
+                    std::string pathEasy = ojnPath + ":0:" + std::to_string(header.level[0]);
+                    std::string pathNormal = ojnPath + ":1:" + std::to_string(header.level[1]);
+                    std::string pathHard = ojnPath + ":2:" + std::to_string(header.level[2]);
+
+                    // Add difficulty info
+                    DifficultyInfo diffEasy;
+                    diffEasy.path = pathEasy;
+                    diffEasy.version = "Easy Lv." + std::to_string(header.level[0]);
+                    diffEasy.creator = creator;
+                    diffEasy.keyCount = 7;
+                    diffEasy.starRatings[0] = starEasy[0];
+                    diffEasy.starRatings[1] = starEasy[1];
+
+                    DifficultyInfo diffNormal;
+                    diffNormal.path = pathNormal;
+                    diffNormal.version = "Normal Lv." + std::to_string(header.level[1]);
+                    diffNormal.creator = creator;
+                    diffNormal.keyCount = 7;
+                    diffNormal.starRatings[0] = starNormal[0];
+                    diffNormal.starRatings[1] = starNormal[1];
+
+                    DifficultyInfo diffHard;
+                    diffHard.path = pathHard;
+                    diffHard.version = "Hard Lv." + std::to_string(header.level[2]);
+                    diffHard.creator = creator;
+                    diffHard.keyCount = 7;
+                    diffHard.starRatings[0] = starHard[0];
+                    diffHard.starRatings[1] = starHard[1];
+
+                    // Add beatmapFiles and difficulties together
+                    song.beatmapFiles.push_back(pathEasy);
+                    song.difficulties.push_back(diffEasy);
+                    song.beatmapFiles.push_back(pathNormal);
+                    song.difficulties.push_back(diffNormal);
+                    song.beatmapFiles.push_back(pathHard);
+                    song.difficulties.push_back(diffHard);
                 } else {
-                    song.beatmapFiles.push_back(file.path().string() + ":0:0");
-                    song.beatmapFiles.push_back(file.path().string() + ":1:0");
-                    song.beatmapFiles.push_back(file.path().string() + ":2:0");
+                    std::string p0 = ojnPath + ":0:0";
+                    std::string p1 = ojnPath + ":1:0";
+                    std::string p2 = ojnPath + ":2:0";
+                    DifficultyInfo d1; d1.path = p0; d1.version = "Easy"; d1.keyCount = 7;
+                    DifficultyInfo d2; d2.path = p1; d2.version = "Normal"; d2.keyCount = 7;
+                    DifficultyInfo d3; d3.path = p2; d3.version = "Hard"; d3.keyCount = 7;
+                    song.beatmapFiles.push_back(p0);
+                    song.difficulties.push_back(d1);
+                    song.beatmapFiles.push_back(p1);
+                    song.difficulties.push_back(d2);
+                    song.beatmapFiles.push_back(p2);
+                    song.difficulties.push_back(d3);
                 }
                 song.source = BeatmapSource::O2Jam;
             }
@@ -2516,12 +3268,6 @@ void Game::scanSongsFolder() {
                 song.audioPath = song.folderPath + "/" + audioFile;
             }
         } else if (song.source == BeatmapSource::O2Jam) {
-            OjnHeader header;
-            if (OjnParser::getHeader(firstFile, header)) {
-                song.title = std::string(header.title, strnlen(header.title, 64));
-                song.artist = std::string(header.artist, strnlen(header.artist, 32));
-            }
-            // O2Jam: generate preview from key sounds
             // Extract actual OJN path (remove :difficulty:level suffix)
             std::string ojnPath = firstFile;
             size_t colonPos = ojnPath.rfind(':');
@@ -2531,6 +3277,14 @@ void Game::scanSongsFolder() {
                     ojnPath = ojnPath.substr(0, colonPos2);
                 }
             }
+            OjnHeader header;
+            if (OjnParser::getHeader(ojnPath, header)) {
+                song.title = std::string(header.title, strnlen(header.title, 64));
+                song.artist = std::string(header.artist, strnlen(header.artist, 32));
+            }
+            // Extract cover image
+            song.backgroundPath = OjnParser::extractCover(ojnPath);
+            // O2Jam: generate preview from key sounds
             song.audioPath = OjmParser::generatePreview(ojnPath, 30000);
             song.previewTime = -1;  // 40% position
         } else if (song.source == BeatmapSource::DJMax) {
@@ -2548,7 +3302,7 @@ void Game::scanSongsFolder() {
                 std::string songName = chartName.substr(0, underscorePos);
                 // Look for songname.wav or songname.ogg
                 for (const auto& ext : {".wav", ".ogg", ".mp3"}) {
-                    fs::path audioPath = entry.path() / (songName + ext);
+                    fs::path audioPath = entry / (songName + ext);
                     if (fs::exists(audioPath)) {
                         song.audioPath = audioPath.string();
                         break;
@@ -2562,7 +3316,91 @@ void Game::scanSongsFolder() {
             song.title = song.folderName;
         }
 
+        // Save to index cache
+        CachedSong cached;
+        cached.folderPath = song.folderPath;
+        cached.folderName = song.folderName;
+        cached.title = song.title;
+        cached.artist = song.artist;
+        cached.backgroundPath = song.backgroundPath;
+        cached.audioPath = song.audioPath;
+        cached.previewTime = song.previewTime;
+        cached.source = static_cast<int>(song.source);
+        cached.lastModified = SongIndex::getFolderModTime(song.folderPath);
+        for (const auto& d : song.difficulties) {
+            CachedDifficulty cd;
+            cd.path = d.path;
+            cd.version = d.version;
+            cd.creator = d.creator;
+            cd.hash = d.hash;
+            cd.keyCount = d.keyCount;
+            for (int v = 0; v < STAR_RATING_VERSION_COUNT; v++) {
+                cd.starRatings[v] = d.starRatings[v];
+            }
+            cached.difficulties.push_back(cd);
+        }
+        SongIndex::saveIndex(cached);
+
+        // Debug output
+        std::cerr << "Song: " << song.title << " beatmapFiles=" << song.beatmapFiles.size()
+                  << " difficulties=" << song.difficulties.size() << std::endl;
+
+        // Sort difficulties by star rating (ascending)
+        std::vector<size_t> indices(song.difficulties.size());
+        std::iota(indices.begin(), indices.end(), 0);
+        std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+            return song.difficulties[a].starRatings[settings.starRatingVersion] <
+                   song.difficulties[b].starRatings[settings.starRatingVersion];
+        });
+        std::vector<std::string> sortedFiles;
+        std::vector<DifficultyInfo> sortedDiffs;
+        for (size_t i : indices) {
+            sortedFiles.push_back(song.beatmapFiles[i]);
+            sortedDiffs.push_back(song.difficulties[i]);
+        }
+        song.beatmapFiles = std::move(sortedFiles);
+        song.difficulties = std::move(sortedDiffs);
+
         songList.push_back(song);
+    }
+
+sort_and_return:
+    // Sort song list by title using ICU locale-aware comparison
+    // Create ICU collator for sorting
+    UErrorCode status = U_ZERO_ERROR;
+    UCollator* collator = ucol_open("", &status);  // Default locale
+    if (U_SUCCESS(status) && collator) {
+        // Set collator strength for case-insensitive comparison
+        ucol_setStrength(collator, UCOL_SECONDARY);
+        // Enable numeric collation ("2" before "10")
+        ucol_setAttribute(collator, UCOL_NUMERIC_COLLATION, UCOL_ON, &status);
+
+        std::sort(songList.begin(), songList.end(),
+            [collator](const SongEntry& a, const SongEntry& b) {
+                // Convert UTF-8 to UTF-16 for ICU
+                UErrorCode err = U_ZERO_ERROR;
+                std::vector<UChar> ua(a.title.length() * 2 + 1);
+                std::vector<UChar> ub(b.title.length() * 2 + 1);
+
+                int32_t lenA = 0, lenB = 0;
+                u_strFromUTF8(ua.data(), (int32_t)ua.size(), &lenA,
+                              a.title.c_str(), -1, &err);
+                err = U_ZERO_ERROR;
+                u_strFromUTF8(ub.data(), (int32_t)ub.size(), &lenB,
+                              b.title.c_str(), -1, &err);
+
+                UCollationResult result = ucol_strcoll(collator,
+                    ua.data(), lenA, ub.data(), lenB);
+                return result == UCOL_LESS;
+            });
+
+        ucol_close(collator);
+    } else {
+        // Fallback to simple comparison if ICU fails
+        std::sort(songList.begin(), songList.end(),
+            [](const SongEntry& a, const SongEntry& b) {
+                return a.title < b.title;
+            });
     }
 }
 
@@ -2595,6 +3433,9 @@ void Game::loadSongBackground(int index) {
 
 void Game::playPreviewMusic(int index) {
     if (index < 0 || index >= (int)songList.size()) return;
+
+    // Reset playback rate to 1.0 for preview (in case DT/HT was enabled during gameplay)
+    audio.setPlaybackRate(1.0f);
 
     if (audio.isPlaying()) {
         // Fade out current, then play new

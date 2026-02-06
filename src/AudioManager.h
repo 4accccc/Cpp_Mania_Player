@@ -1,8 +1,10 @@
 #pragma once
+#define NOMINMAX
 #include <string>
 #include <vector>
 #include <unordered_map>
-#include <SDL3_mixer/SDL_mixer.h>
+#include <bass.h>
+#include <bass_fx.h>
 
 class AudioManager {
 public:
@@ -10,14 +12,16 @@ public:
     ~AudioManager();
 
     bool init();
-    bool loadMusic(const std::string& filepath, bool loop = true);  // loop: true for game, false for preview
+    bool loadMusic(const std::string& filepath, bool loop = true);
+
     void play();
     void stop();
-    void fadeIn(int ms);   // Fade in over ms milliseconds
-    void fadeOut(int ms);  // Fade out over ms milliseconds
+    void fadeIn(int ms);
+    void fadeOut(int ms);
     void pause();
     void resume();
     int64_t getPosition() const;
+    int64_t getRawPosition() const { return getPosition(); }  // Same as getPosition with BASS
     void setPosition(int64_t ms);
     int64_t getDuration() const;
     bool isPlaying() const;
@@ -28,26 +32,32 @@ public:
     int getDeviceCount() const;
 
     // Sample (key sound) support
-    int loadSample(const std::string& filepath);  // Returns sample handle, -1 on failure
-    void playSample(int handle, int volume = 100);  // volume: 0-100
-    void clearSamples();  // Clear all loaded samples
-    void setSampleVolume(int volume);  // Master sample volume (0-100)
+    int loadSample(const std::string& filepath);
+    void playSample(int handle, int volume = 100);
+    void pauseAllSamples();
+    void resumeAllSamples();
+    void stopAllSamples();
+    void clearSamples();
+    void setSampleVolume(int volume);
     int getSampleVolume() const;
 
+    // Playback speed control (for DT/HT mods)
+    void setPlaybackRate(float rate);
+    float getPlaybackRate() const;
+    void setChangePitch(bool change);
+    bool getChangePitch() const;
+
 private:
-    MIX_Mixer* mixer;
-    MIX_Audio* audio;
-    MIX_Track* track;
-    int sampleRate;       // Mixer sample rate
-    int audioSampleRate;  // Current audio file's sample rate
+    HSTREAM decodeStream;   // Decode stream (source)
+    HSTREAM tempoStream;    // Tempo stream (for playback)
     bool initialized;
     int currentVolume;
-    int sampleVolume;  // Master volume for samples
+    int sampleVolume;
+    float playbackRate;
+    bool changePitch;
+    bool loopMusic;
 
-    // Sample cache: handle -> MIX_Audio*
-    std::unordered_map<int, MIX_Audio*> sampleCache;
-    std::vector<MIX_Track*> sampleTracks;  // Tracks for playing samples
+    // Sample cache: handle -> HSAMPLE
+    std::unordered_map<int, HSAMPLE> sampleCache;
     int nextSampleHandle;
-    size_t nextTrackIndex;  // Round-robin track selection
-    static const int MAX_SAMPLE_TRACKS = 256;  // Max concurrent samples for O2Jam BGM
 };

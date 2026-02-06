@@ -6,14 +6,17 @@
 HPManager::HPManager()
     : currentHP_(MAX_HP)
     , targetHP_(MAX_HP)
-    , recoveryRate_(0.02)  // osu! default recovery rate
     , hpDrainRate_(5.0)
+    , transitionStartHP_(MAX_HP)
+    , transitionTime_(TRANSITION_DURATION)  // Start fully transitioned
 {
 }
 
 void HPManager::reset() {
     currentHP_ = MAX_HP;
     targetHP_ = MAX_HP;
+    transitionStartHP_ = MAX_HP;
+    transitionTime_ = TRANSITION_DURATION;
 }
 
 void HPManager::setHPDrainRate(double rate) {
@@ -33,32 +36,26 @@ void HPManager::processJudgement(Judgement judgement) {
 
     switch (judgement) {
         case Judgement::Miss:
-            // Miss: -(HP + 1) × 1.5
             hpChange = -(hpDrainRate_ + 1.0) * 1.5;
             break;
 
         case Judgement::Bad:  // 50
-            // 50: -(HP + 1) × 0.32
             hpChange = -(hpDrainRate_ + 1.0) * 0.32;
             break;
 
         case Judgement::Good:  // 100
-            // 100: 不变
             hpChange = 0.0;
             break;
 
         case Judgement::Great:  // 200
-            // 200: base × (0.8 - HP × 0.08)
             hpChange = 1.0 * (0.8 - hpDrainRate_ * 0.08);
             break;
 
         case Judgement::Perfect:  // 300
-            // 300: base × (1.0 - HP × 0.1)
             hpChange = 1.0 * (1.0 - hpDrainRate_ * 0.1);
             break;
 
         case Judgement::Marvelous:  // 300g
-            // 300g: base × (1.1 - HP × 0.1)
             hpChange = 1.0 * (1.1 - hpDrainRate_ * 0.1);
             break;
 
@@ -66,7 +63,13 @@ void HPManager::processJudgement(Judgement judgement) {
             break;
     }
 
-    targetHP_ = std::clamp(targetHP_ + hpChange, MIN_HP, MAX_HP);
+    double newTarget = std::clamp(targetHP_ + hpChange, MIN_HP, MAX_HP);
+    if (newTarget != targetHP_) {
+        // Start new transition from current displayed HP
+        transitionStartHP_ = currentHP_;
+        transitionTime_ = 0.0;
+        targetHP_ = newTarget;
+    }
 }
 
 void HPManager::processHoldTick(Judgement accuracy) {
@@ -86,35 +89,43 @@ void HPManager::processHoldTick(Judgement accuracy) {
             break;
     }
 
-    targetHP_ = std::clamp(targetHP_ + hpChange, MIN_HP, MAX_HP);
+    double newTarget = std::clamp(targetHP_ + hpChange, MIN_HP, MAX_HP);
+    if (newTarget != targetHP_) {
+        transitionStartHP_ = currentHP_;
+        transitionTime_ = 0.0;
+        targetHP_ = newTarget;
+    }
 }
 
 void HPManager::processHoldBreak() {
-    targetHP_ = std::clamp(targetHP_ - 56.0, MIN_HP, MAX_HP);
+    double newTarget = std::clamp(targetHP_ - 56.0, MIN_HP, MAX_HP);
+    if (newTarget != targetHP_) {
+        transitionStartHP_ = currentHP_;
+        transitionTime_ = 0.0;
+        targetHP_ = newTarget;
+    }
 }
 
 void HPManager::update(double deltaTime) {
-    // osu! style HP transition
-    // deltaTime is in seconds, convert to osu! scale factor
-    // osu!: double_0 = deltaTime_ms / 16.6667 (relative to 60fps)
+    // lazer-style HP transition: 200ms with OutQuint easing
     double deltaMs = deltaTime * 1000.0;
-    double scaleFactor = deltaMs / 16.6667;
 
-    if (currentHP_ < targetHP_) {
-        // Recovery: linear increase
-        // osu!: displayHealth += 0.02 * deltaTime_ms
-        currentHP_ = std::min(MAX_HP, currentHP_ + recoveryRate_ * deltaMs);
-        if (currentHP_ > targetHP_) {
-            currentHP_ = targetHP_;
-        }
+    if (transitionTime_ < TRANSITION_DURATION) {
+        transitionTime_ = std::min(transitionTime_ + deltaMs, TRANSITION_DURATION);
+
+        // Interpolation with OutQuint easing
+        double t = transitionTime_ / TRANSITION_DURATION;  // 0 to 1
+        double easedT = easeOutQuint(t);
+
+        // Lerp from start to target
+        currentHP_ = transitionStartHP_ + (targetHP_ - transitionStartHP_) * easedT;
+    } else {
+        currentHP_ = targetHP_;
     }
-    else if (currentHP_ > targetHP_) {
-        // Drain: exponential decay
-        // osu!: displayHealth -= diff / 6.0 * double_0
-        double diff = currentHP_ - targetHP_;
-        currentHP_ = std::max(MIN_HP, currentHP_ - (diff / 6.0) * scaleFactor);
-        if (currentHP_ < targetHP_) {
-            currentHP_ = targetHP_;
-        }
-    }
+}
+
+double HPManager::easeOutQuint(double t) {
+    // OutQuint: 1 - (1 - t)^5
+    double inv = 1.0 - t;
+    return 1.0 - (inv * inv * inv * inv * inv);
 }

@@ -10,7 +10,7 @@
 #include <wincrypt.h>
 #endif
 
-static std::string calculateMD5(const std::string& filepath) {
+std::string OsuParser::calculateMD5(const std::string& filepath) {
 #ifdef _WIN32
     std::ifstream file(filepath, std::ios::binary);
     if (!file) return "";

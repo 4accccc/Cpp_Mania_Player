@@ -29,15 +29,17 @@ public:
     void renderStageBorders();
     void renderKeys(const bool* laneKeyDown, int keyCount);
     void renderHitLighting(const bool* laneKeyDown, int keyCount);
+    void renderNoteLighting(const bool* laneHoldActive, int keyCount, int64_t currentTime);  // LightingN/LightingL effects
+    void triggerLightingN(int lane, int64_t time);  // Trigger LightingN animation on note hit
     void renderLaneHighlights(const bool* laneKeyDown, int keyCount, bool hiddenMod, bool fadeInMod, int combo);
-    void renderNotes(std::vector<Note>& notes, int64_t currentTime, int scrollSpeed, double baseBPM, bool bpmScaleMode, const std::vector<TimingPoint>& timingPoints, const NoteColor* colors, bool hiddenMod = false, bool fadeInMod = false, int combo = 0, bool ignoreSV = false);
+    void renderNotes(std::vector<Note>& notes, int64_t currentTime, int scrollSpeed, double baseBPM, bool bpmScaleMode, const std::vector<TimingPoint>& timingPoints, const NoteColor* colors, bool hiddenMod = false, bool fadeInMod = false, int combo = 0, bool ignoreSV = false, double clockRate = 1.0);
     void renderJudgeLine();
     void renderJudgement(const std::string& text);
     void renderHitJudgement(int judgement, int64_t elapsedMs);  // elapsed time since judgement
-    void renderSpeedInfo(int scrollSpeed, bool bpmScaleMode, bool autoPlay);
+    void renderSpeedInfo(int scrollSpeed, bool bpmScaleMode, bool autoPlay, bool autoPlayEnabled);
     void renderFPS(int fps);
     void renderGameInfo(int64_t currentTime, int64_t totalTime, const int* judgeCounts, double accuracy, int score);
-    void renderCombo(int combo, int64_t comboAnimTime, bool comboBreak, int64_t breakAnimTime);
+    void renderCombo(int combo, int64_t comboAnimTime, bool comboBreak, int64_t breakAnimTime, int lastComboValue, bool holdActive, int64_t holdColorTime);
     void renderHPBar(double hpPercent);
     void renderHPBarKi(double currentHP, float barX, float barY, float scale);
     void renderScorePanel(const char* playerName, int score, double accuracy, int maxCombo);
@@ -114,10 +116,14 @@ private:
     int64_t hpBarLastFrameTime;        // Last frame switch time
     int hpBarFrameCount;               // Total frame count (cached)
 
+    // LightingN animation (per lane hit time)
+    int64_t lightingNHitTime[18];      // Time when note was hit (for LightingN animation)
+
     float getLaneX(int lane) const;
     float getLaneWidth(int lane) const;
     float getColumnSpacing(int lane) const;
-    int getNoteY(int64_t noteTime, int64_t currentTime, int scrollSpeed, double baseBPM, bool bpmScaleMode, const std::vector<TimingPoint>& timingPoints, bool ignoreSV = false) const;
+    int getNoteY(int64_t noteTime, int64_t currentTime, int scrollSpeed, double baseBPM, bool bpmScaleMode, const std::vector<TimingPoint>& timingPoints, bool ignoreSV = false, double clockRate = 1.0) const;
+    int getHoldHeadY(const Note& note, int naturalY, int64_t currentTime, int scrollSpeed) const;
     double getSVMultiplier(int64_t time, const std::vector<TimingPoint>& timingPoints) const;
     double getBaseBeatLength(int64_t time, const std::vector<TimingPoint>& timingPoints) const;
     void updateLaneLayout();

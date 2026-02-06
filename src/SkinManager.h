@@ -24,15 +24,33 @@ public:
     const SkinConfig& getConfig() const { return config; }
     const ManiaConfig* getManiaConfig(int keyCount) const;
 
-    // Texture getters - Note related
-    SDL_Texture* getNoteTexture(int column, int keyCount) const;
-    SDL_Texture* getNoteHeadTexture(int column, int keyCount) const;
-    SDL_Texture* getNoteBodyTexture(int column, int keyCount) const;
-    SDL_Texture* getNoteTailTexture(int column, int keyCount) const;
+    // Texture getters - Note related (with multi-frame animation support)
+    SDL_Texture* getNoteTexture(int column, int keyCount, int frame = 0) const;
+    std::vector<SDL_Texture*> getNoteFrames(int column, int keyCount) const;
+    int getNoteFrameCount(int column, int keyCount) const;
+
+    SDL_Texture* getNoteHeadTexture(int column, int keyCount, int frame = 0) const;
+    std::vector<SDL_Texture*> getNoteHeadFrames(int column, int keyCount) const;
+    int getNoteHeadFrameCount(int column, int keyCount) const;
+
+    SDL_Texture* getNoteTailTexture(int column, int keyCount, int frame = 0) const;
+    std::vector<SDL_Texture*> getNoteTailFrames(int column, int keyCount) const;
+    int getNoteTailFrameCount(int column, int keyCount) const;
+
+    // Multi-frame texture getters for hold note body animation
+    std::vector<SDL_Texture*> getNoteBodyFrames(int column, int keyCount) const;
+    int getNoteBodyFrameCount(int column, int keyCount) const;
+    SDL_Texture* getNoteBodyTexture(int column, int keyCount, int frame = 0) const;
+
+    // Animation frame interval helpers (in milliseconds)
+    float getNoteFrameInterval(int frameCount) const;      // For note/head/tail: 16.67ms or skin config
+    float getNoteBodyFrameInterval() const { return 30.0f; } // Hold body: fixed 30ms
+    float getLightingFrameInterval(int frameCount) const { return frameCount > 0 ? 170.0f / frameCount : 170.0f; } // Lighting: 170ms total
 
     // Texture getters - Key related
     SDL_Texture* getKeyTexture(int column, int keyCount) const;
     SDL_Texture* getKeyDownTexture(int column, int keyCount) const;
+    bool hasCustomKeyImage(int keyCount) const;
 
     // Texture getters - Stage related
     SDL_Texture* getStageHintTexture(int keyCount) const;
@@ -41,9 +59,14 @@ public:
     SDL_Texture* getStageBottomTexture() const;
     SDL_Texture* getStageLightTexture() const;
 
-    // Texture getters - Lighting related
-    SDL_Texture* getLightingNTexture(int keyCount) const;
-    SDL_Texture* getLightingLTexture(int keyCount) const;
+    // Texture getters - Lighting related (with multi-frame animation support)
+    SDL_Texture* getLightingNTexture(int keyCount, int frame = 0) const;
+    std::vector<SDL_Texture*> getLightingNFrames(int keyCount) const;
+    int getLightingNFrameCount(int keyCount) const;
+
+    SDL_Texture* getLightingLTexture(int keyCount, int frame = 0) const;
+    std::vector<SDL_Texture*> getLightingLFrames(int keyCount) const;
+    int getLightingLFrameCount(int keyCount) const;
 
     // Texture getters - Judgement related
     SDL_Texture* getHitTexture(const std::string& judgement) const;
@@ -62,6 +85,8 @@ public:
     SDL_Texture* getScorebarKiDangerTexture() const;
     SDL_Texture* getScorebarKiDanger2Texture() const;
     SDL_Texture* getScorebarMarkerTexture() const;
+    bool hasCustomScorebarColour() const;  // Check if scorebar-colour is from skin
+    bool hasScorebarMarker() const;        // Check if scorebar-marker exists in skin
 
     // Get texture size
     bool getTextureSize(SDL_Texture* tex, float* w, float* h) const;
@@ -79,6 +104,7 @@ private:
 
     // Texture loading
     SDL_Texture* loadTexture(const std::string& name);
+    std::vector<SDL_Texture*> loadTextureFrames(const std::string& baseName);
     std::string findImageFile(const std::string& baseName) const;
 
     // Helper functions
@@ -95,4 +121,9 @@ private:
 
     // Texture cache
     mutable std::map<std::string, SDL_Texture*> textureCache;
+    mutable std::map<std::string, std::vector<SDL_Texture*>> frameCache;  // Multi-frame texture cache
+
+    // Note texture result cache (to avoid repeated file system operations)
+    mutable std::map<std::string, std::vector<SDL_Texture*>> noteHeadCache;
+    mutable std::map<std::string, std::vector<SDL_Texture*>> noteTailCache;
 };

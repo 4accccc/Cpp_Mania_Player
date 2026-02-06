@@ -6,28 +6,35 @@
 
 // osu!mania specific config - per key count configuration
 struct ManiaConfig {
+    // Conversion factor from legacy positioning values (based in 480 dimensions) to 768
+    static constexpr float POSITION_SCALE_FACTOR = 1.6f;
+    // Size of a legacy column in the default skin (50 in 480 coords = 80 in 768 coords)
+    static constexpr float DEFAULT_COLUMN_SIZE = 50.0f * POSITION_SCALE_FACTOR;  // 80
+    // Default hit position (480 - 402) * 1.6 = 124.8
+    static constexpr float DEFAULT_HIT_POSITION = (480.0f - 402.0f) * POSITION_SCALE_FACTOR;
+
     int keys = 4;                              // Key count (1-18)
 
-    // Column configuration
-    std::vector<float> columnWidth;            // Column width (default 30, range 5-100)
-    std::vector<float> columnLineWidth;        // Column line width (default 2, min 2)
+    // Column configuration (values are scaled by POSITION_SCALE_FACTOR)
+    std::vector<float> columnWidth;            // Column width (default 48 after scaling)
+    std::vector<float> columnLineWidth;        // Column line width (default 2, NOT scaled)
     std::vector<bool> columnLine;              // Column line enable/disable
-    std::vector<float> columnSpacing;          // Column spacing (default 0)
+    std::vector<float> columnSpacing;          // Column spacing (default 0, scaled)
     float columnStart = 136.0f;                // Column start X position
     float columnRight = 19.0f;                 // Column right margin
 
-    // Judgement and lighting config
+    // Judgement and lighting config (positions are scaled)
     bool judgementLine = true;                 // Show judgement line
-    int hitPosition = 402;                     // Hit position Y (range 240-480, default 402)
-    int lightPosition = 413;                   // Light position Y
+    float hitPosition = DEFAULT_HIT_POSITION;  // Hit position Y (scaled from 480 coord)
+    float lightPosition = (480.0f - 413.0f) * POSITION_SCALE_FACTOR;  // Light position Y (scaled)
     int lightFramePerSecond = 60;              // Light frame rate (min 24)
-    std::vector<float> lightingNWidth;         // Normal note lighting width
-    std::vector<float> lightingLWidth;         // Hold note lighting width
+    std::vector<float> explosionWidth;         // LightingN width per column
+    std::vector<float> holdNoteLightWidth;     // LightingL width per column
 
-    // Display position config
-    int comboPosition = 111;                   // Combo display Y position
-    int scorePosition = 325;                   // Score display Y position
-    float barlineHeight = 1.2f;                // Barline height
+    // Display position config (scaled)
+    float comboPosition = 111.0f * POSITION_SCALE_FACTOR;   // Combo display Y position
+    float scorePosition = 300.0f * POSITION_SCALE_FACTOR;   // Score display Y position
+    float barlineHeight = 1.0f;                // Barline height (NOT scaled)
     float barlineWidth = 0.0f;                 // Barline width
 
     // Layout config
@@ -36,8 +43,11 @@ struct ManiaConfig {
     bool separateScore = true;                 // Separate score display
     bool keysUnderNotes = false;               // Keys under notes
     float stageSeparation = 40.0f;             // Stage separation (min 5)
-    float widthForNoteHeightScale = 0.0f;      // Note height scale width
+    float widthForNoteHeightScale = 0.0f;      // Note height scale width (scaled)
     bool upsideDown = false;                   // Upside down display
+
+    // Note body style (global, can be overridden per column)
+    int noteBodyStyle = -1;                    // -1 = not set, use version default
 
     // Note image config (per column)
     std::vector<std::string> noteImage;        // Normal note image
@@ -45,7 +55,7 @@ struct ManiaConfig {
     std::vector<std::string> noteImageT;       // Hold note tail
     std::vector<std::string> noteImageL;       // Hold note body
     std::vector<bool> noteFlipWhenUpsideDown;  // Flip when upside down
-    std::vector<int> noteBodyStyle;            // Note body style
+    std::vector<int> noteBodyStylePerColumn;   // Note body style per column (-1 = use global)
 
     // Key image config (per column)
     std::vector<std::string> keyImage;         // Key image
@@ -60,6 +70,10 @@ struct ManiaConfig {
     std::string lightingN;                     // Normal lighting
     std::string lightingL;                     // Hold lighting
     std::string warningArrow;                  // Warning arrow
+
+    // Image lookups dictionary (stores custom image paths from skin.ini)
+    // Keys: NoteImage0, NoteImage0H, KeyImage0, KeyImage0D, Hit300g, etc.
+    std::map<std::string, std::string> imageLookups;
 
     // Color config
     std::vector<SDL_Color> colour;             // Column colors
@@ -76,10 +90,33 @@ struct ManiaConfig {
     int comboOverlap = 0;                      // Combo digit overlap
 
     ManiaConfig() {
-        columnWidth.resize(keys, 30.0f);
+        columnWidth.resize(keys, DEFAULT_COLUMN_SIZE);
         columnLineWidth.resize(keys + 1, 2.0f);
         columnLine.resize(keys + 1, true);
         columnSpacing.resize(keys - 1, 0.0f);
+        explosionWidth.resize(keys, 0.0f);
+        holdNoteLightWidth.resize(keys, 0.0f);
+    }
+
+    // Initialize arrays for specific key count
+    void initForKeys(int keyCount) {
+        keys = keyCount;
+        columnWidth.resize(keys, DEFAULT_COLUMN_SIZE);
+        columnLineWidth.resize(keys + 1, 0.0f);  // Default: no separator lines
+        columnLine.resize(keys + 1, true);
+        columnSpacing.resize(keys > 1 ? keys - 1 : 0, 0.0f);
+        explosionWidth.resize(keys, 0.0f);
+        holdNoteLightWidth.resize(keys, 0.0f);
+    }
+
+    // Get minimum column width
+    float getMinimumColumnWidth() const {
+        if (columnWidth.empty()) return DEFAULT_COLUMN_SIZE;
+        float minWidth = columnWidth[0];
+        for (size_t i = 1; i < columnWidth.size(); i++) {
+            if (columnWidth[i] < minWidth) minWidth = columnWidth[i];
+        }
+        return minWidth;
     }
 };
 
@@ -89,6 +126,7 @@ struct SkinConfig {
     std::string name;
     std::string author;
     std::string version = "latest";
+    int animationFramerate = 0;  // 0 = use default (1000/frameCount or 60fps)
 
     // [Fonts] section
     std::string hitCirclePrefix = "default";
@@ -115,7 +153,7 @@ struct SkinConfig {
     ManiaConfig* getOrCreateManiaConfig(int keyCount) {
         if (maniaConfigs.find(keyCount) == maniaConfigs.end()) {
             maniaConfigs[keyCount] = ManiaConfig();
-            maniaConfigs[keyCount].keys = keyCount;
+            maniaConfigs[keyCount].initForKeys(keyCount);
         }
         return &maniaConfigs[keyCount];
     }

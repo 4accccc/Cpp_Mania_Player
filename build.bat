@@ -17,8 +17,10 @@ echo Compiling...
 cl /EHsc /std:c++17 /O2 ^
     /I"D:\work\SDL3-3.2.30\include" ^
     /I"D:\work\SDL3_ttf-3.2.0\include" ^
-    /I"D:\work\SDL3_mixer-3.1.2\include" ^
+    /I"D:\work\bass24\c" ^
+    /I"D:\work\bass_fx24\C" ^
     /I"D:\work\lzma2501\C\C" ^
+    /I"D:\work\icu4c-78.2-Win64-MSVC2022\include" ^
     src\*.cpp ^
     "D:\work\lzma2501\C\C\LzmaEnc.c" ^
     "D:\work\lzma2501\C\C\LzmaDec.c" ^
@@ -31,10 +33,13 @@ cl /EHsc /std:c++17 /O2 ^
     /link ^
     /LIBPATH:"D:\work\SDL3-3.2.30\lib\x64" ^
     /LIBPATH:"D:\work\SDL3_ttf-3.2.0\lib\x64" ^
-    /LIBPATH:"D:\work\SDL3_mixer-3.1.2\lib\x64" ^
-    SDL3.lib SDL3_ttf.lib SDL3_mixer.lib ^
+    /LIBPATH:"D:\work\bass24\c\x64" ^
+    /LIBPATH:"D:\work\bass_fx24\C\x64" ^
+    /LIBPATH:"D:\work\icu4c-78.2-Win64-MSVC2022\lib64" ^
+    SDL3.lib SDL3_ttf.lib bass.lib bass_fx.lib ^
+    icuuc.lib icuin.lib ^
     shell32.lib Advapi32.lib comdlg32.lib ^
-    /SUBSYSTEM:CONSOLE
+    /SUBSYSTEM:WINDOWS
 
 if %ERRORLEVEL% EQU 0 (
     echo Build successful!

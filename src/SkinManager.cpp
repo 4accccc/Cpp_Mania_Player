@@ -55,7 +55,11 @@ void SkinManager::unloadSkin() {
         }
     }
     textureCache.clear();
+    frameCache.clear();  // Clear multi-frame cache (textures already destroyed above)
+    noteHeadCache.clear();
+    noteTailCache.clear();
     config = SkinConfig();
+    skinPath = "";  // Clear skin path so findImageFile won't use old path
     loaded = false;
 }
 
@@ -69,6 +73,9 @@ void SkinManager::setBeatmapPath(const std::string& path) {
             }
         }
         textureCache.clear();
+        frameCache.clear();
+        noteHeadCache.clear();
+        noteTailCache.clear();
         beatmapPath = path;
     }
 }
@@ -82,6 +89,9 @@ void SkinManager::clearBeatmapPath() {
             }
         }
         textureCache.clear();
+        frameCache.clear();
+        noteHeadCache.clear();
+        noteTailCache.clear();
         beatmapPath.clear();
     }
 }
@@ -167,6 +177,9 @@ void SkinManager::parseGeneralSection(const std::string& key, const std::string&
     if (key == "Name") config.name = value;
     else if (key == "Author") config.author = value;
     else if (key == "Version") config.version = value;
+    else if (key == "AnimationFramerate") {
+        try { config.animationFramerate = std::stoi(value); } catch (...) {}
+    }
 }
 
 void SkinManager::parseColoursSection(const std::string& key, const std::string& value) {
@@ -189,13 +202,17 @@ void SkinManager::parseFontsSection(const std::string& key, const std::string& v
 
 void SkinManager::parseManiaSection(const std::string& key, const std::string& value, ManiaConfig* cfg) {
     try {
+    const float SCALE = ManiaConfig::POSITION_SCALE_FACTOR;
+
     // Column configuration
     if (key == "ColumnWidth") {
         cfg->columnWidth.clear();
         for (const auto& w : split(value, ',')) {
             if (!w.empty()) {
-                float width = std::stof(w);
-                cfg->columnWidth.push_back(std::max(5.0f, std::min(100.0f, width)));
+                float width = 0;
+                try { width = std::stof(w); } catch (...) { width = 0; }
+                // Apply scale factor like lazer does
+                cfg->columnWidth.push_back(width * SCALE);
             }
         }
     }
@@ -203,7 +220,9 @@ void SkinManager::parseManiaSection(const std::string& key, const std::string& v
         cfg->columnLineWidth.clear();
         for (const auto& w : split(value, ',')) {
             if (!w.empty()) {
-                float width = std::stof(w);  // Allow 0 to hide line
+                float width = 0;
+                try { width = std::stof(w); } catch (...) { width = 0; }
+                // ColumnLineWidth does NOT apply scale factor
                 cfg->columnLineWidth.push_back(width);
             }
         }
@@ -211,7 +230,12 @@ void SkinManager::parseManiaSection(const std::string& key, const std::string& v
     else if (key == "ColumnSpacing") {
         cfg->columnSpacing.clear();
         for (const auto& s : split(value, ',')) {
-            if (!s.empty()) cfg->columnSpacing.push_back(std::stof(s));
+            if (!s.empty()) {
+                float spacing = 0;
+                try { spacing = std::stof(s); } catch (...) { spacing = 0; }
+                // Apply scale factor
+                cfg->columnSpacing.push_back(spacing * SCALE);
+            }
         }
     }
     else if (key == "ColumnStart") cfg->columnStart = std::stof(value);
@@ -219,24 +243,40 @@ void SkinManager::parseManiaSection(const std::string& key, const std::string& v
 
     // Judgement and lighting
     else if (key == "JudgementLine") cfg->judgementLine = (value == "1" || value == "true");
-    else if (key == "HitPosition") cfg->hitPosition = std::max(240, std::min(480, std::stoi(value)));
-    else if (key == "LightPosition") cfg->lightPosition = std::stoi(value);
-    else if (key == "LightFramePerSecond") cfg->lightFramePerSecond = std::max(24, std::stoi(value));
+    else if (key == "HitPosition") {
+        // lazer: (480 - clamp(value, 240, 480)) * SCALE
+        float rawValue = std::stof(value);
+        rawValue = std::max(240.0f, std::min(480.0f, rawValue));
+        cfg->hitPosition = (480.0f - rawValue) * SCALE;
+    }
+    else if (key == "LightPosition") {
+        // lazer: (480 - value) * SCALE
+        float rawValue = std::stof(value);
+        cfg->lightPosition = (480.0f - rawValue) * SCALE;
+    }
+    else if (key == "LightFramePerSecond") {
+        int fps = std::stoi(value);
+        cfg->lightFramePerSecond = fps > 0 ? fps : 24;
+    }
 
-    // Display positions
-    else if (key == "ComboPosition") cfg->comboPosition = std::stoi(value);
-    else if (key == "ScorePosition") cfg->scorePosition = std::stoi(value);
-    else if (key == "BarlineHeight") cfg->barlineHeight = std::stof(value);
+    // Display positions (apply scale factor)
+    else if (key == "ComboPosition") cfg->comboPosition = std::stof(value) * SCALE;
+    else if (key == "ScorePosition") cfg->scorePosition = std::stof(value) * SCALE;
+    else if (key == "BarlineHeight") cfg->barlineHeight = std::stof(value);  // No scale
 
     // Layout
     else if (key == "SpecialStyle") cfg->specialStyle = std::stoi(value);
     else if (key == "KeysUnderNotes") cfg->keysUnderNotes = (value == "1" || value == "true");
     else if (key == "StageSeparation") cfg->stageSeparation = std::max(5.0f, std::stof(value));
-    else if (key == "WidthForNoteHeightScale") cfg->widthForNoteHeightScale = std::stof(value);
+    else if (key == "WidthForNoteHeightScale") cfg->widthForNoteHeightScale = std::stof(value) * SCALE;
     else if (key == "UpsideDown") cfg->upsideDown = (value == "1" || value == "true");
 
-    // Note images - NoteImage0, NoteImage1, etc.
+    // Note images - store in imageLookups dictionary (like lazer)
+    // NoteImage0, NoteImage1, NoteImage0H, NoteImage0L, NoteImage0T, etc.
     else if (key.find("NoteImage") == 0) {
+        cfg->imageLookups[key] = value;
+
+        // Also maintain backward compatibility with old vectors
         std::string suffix = key.substr(9);
         if (suffix.empty()) return;
 
@@ -263,8 +303,12 @@ void SkinManager::parseManiaSection(const std::string& key, const std::string& v
         }
     }
 
-    // Key images - KeyImage0, KeyImage0D, etc.
+    // Key images - store in imageLookups dictionary
+    // KeyImage0, KeyImage1, KeyImage0D, etc.
     else if (key.find("KeyImage") == 0) {
+        cfg->imageLookups[key] = value;
+
+        // Also maintain backward compatibility
         std::string suffix = key.substr(8);
         if (suffix.empty()) return;
 
@@ -281,15 +325,20 @@ void SkinManager::parseManiaSection(const std::string& key, const std::string& v
         }
     }
 
-    // Stage images
-    else if (key == "StageLeft") cfg->stageLeft = value;
-    else if (key == "StageRight") cfg->stageRight = value;
-    else if (key == "StageBottom") cfg->stageBottom = value;
-    else if (key == "StageHint") cfg->stageHint = value;
-    else if (key == "StageLight") cfg->stageLight = value;
-    else if (key == "LightingN") cfg->lightingN = value;
-    else if (key == "LightingL") cfg->lightingL = value;
-    else if (key == "WarningArrow") cfg->warningArrow = value;
+    // Stage images - store in imageLookups dictionary
+    else if (key == "StageLeft") { cfg->stageLeft = value; cfg->imageLookups[key] = value; }
+    else if (key == "StageRight") { cfg->stageRight = value; cfg->imageLookups[key] = value; }
+    else if (key == "StageBottom") { cfg->stageBottom = value; cfg->imageLookups[key] = value; }
+    else if (key == "StageHint") { cfg->stageHint = value; cfg->imageLookups[key] = value; }
+    else if (key == "StageLight") { cfg->stageLight = value; cfg->imageLookups[key] = value; }
+    else if (key == "LightingN") { cfg->lightingN = value; cfg->imageLookups[key] = value; }
+    else if (key == "LightingL") { cfg->lightingL = value; cfg->imageLookups[key] = value; }
+    else if (key == "WarningArrow") { cfg->warningArrow = value; cfg->imageLookups[key] = value; }
+
+    // Hit images - store in imageLookups (Hit300g, Hit300, Hit200, Hit100, Hit50, Hit0)
+    else if (key.find("Hit") == 0 && key.size() > 3) {
+        cfg->imageLookups[key] = value;
+    }
 
     // Column colors - Colour0, Colour1, etc.
     else if (key.find("Colour") == 0 && key.size() > 6) {
@@ -314,10 +363,13 @@ void SkinManager::parseManiaSection(const std::string& key, const std::string& v
             cfg->colourKeyWarning = parseColor(value);
         }
         else if (suffix.find("Light") == 0) {
-            // ColourLight0, ColourLight1, etc.
+            // ColourLight1, ColourLight2, etc. (1-indexed in osu!)
             int col = std::stoi(suffix.substr(5));
-            if (col >= (int)cfg->colourLight.size()) cfg->colourLight.resize(col + 1);
-            cfg->colourLight[col] = parseColor(value);
+            if (col >= 1) {
+                int idx = col - 1;  // Convert to 0-indexed
+                if (idx >= (int)cfg->colourLight.size()) cfg->colourLight.resize(idx + 1);
+                cfg->colourLight[idx] = parseColor(value);
+            }
         }
         else {
             // Colour1, Colour2, etc. - column colors (1-indexed in osu!)
@@ -332,17 +384,25 @@ void SkinManager::parseManiaSection(const std::string& key, const std::string& v
         }
     }
 
-    // Lighting width configs
+    // Lighting width configs (apply scale factor like lazer)
     else if (key == "LightingNWidth") {
-        cfg->lightingNWidth.clear();
+        cfg->explosionWidth.clear();
         for (const auto& w : split(value, ',')) {
-            if (!w.empty()) cfg->lightingNWidth.push_back(std::stof(w));
+            if (!w.empty()) {
+                float width = 0;
+                try { width = std::stof(w); } catch (...) { width = 0; }
+                cfg->explosionWidth.push_back(width * SCALE);
+            }
         }
     }
     else if (key == "LightingLWidth") {
-        cfg->lightingLWidth.clear();
+        cfg->holdNoteLightWidth.clear();
         for (const auto& w : split(value, ',')) {
-            if (!w.empty()) cfg->lightingLWidth.push_back(std::stof(w));
+            if (!w.empty()) {
+                float width = 0;
+                try { width = std::stof(w); } catch (...) { width = 0; }
+                cfg->holdNoteLightWidth.push_back(width * SCALE);
+            }
         }
     }
 
@@ -356,13 +416,18 @@ void SkinManager::parseManiaSection(const std::string& key, const std::string& v
             cfg->noteFlipWhenUpsideDown[col] = (value == "1" || value == "true");
         }
     }
+    else if (key == "NoteBodyStyle") {
+        // Global NoteBodyStyle (no column suffix)
+        cfg->noteBodyStyle = std::stoi(value);
+    }
     else if (key.find("NoteBodyStyle") == 0) {
+        // Per-column NoteBodyStyle (NoteBodyStyle0, NoteBodyStyle1, etc.)
         std::string suffix = key.substr(13);
         if (!suffix.empty()) {
             int col = std::stoi(suffix);
-            if (col >= (int)cfg->noteBodyStyle.size())
-                cfg->noteBodyStyle.resize(col + 1, 0);
-            cfg->noteBodyStyle[col] = std::stoi(value);
+            if (col >= (int)cfg->noteBodyStylePerColumn.size())
+                cfg->noteBodyStylePerColumn.resize(col + 1, -1);
+            cfg->noteBodyStylePerColumn[col] = std::stoi(value);
         }
     }
 
@@ -411,7 +476,6 @@ std::string SkinManager::findImageFile(const std::string& baseName) const {
         return path.string();
     }
 
-    SDL_Log("SkinManager: Image not found: %s (in %s)", baseName.c_str(), skinPath.c_str());
     return "";
 }
 
@@ -486,6 +550,44 @@ SDL_Texture* SkinManager::loadTexture(const std::string& name) {
     return texture;
 }
 
+// Load multi-frame texture (osu! style: name-0, name-1, name-2...)
+std::vector<SDL_Texture*> SkinManager::loadTextureFrames(const std::string& baseName) {
+    std::string normalizedName = baseName;
+    std::replace(normalizedName.begin(), normalizedName.end(), '\\', '/');
+
+    // Check frame cache first
+    auto it = frameCache.find(normalizedName);
+    if (it != frameCache.end()) {
+        return it->second;
+    }
+
+    std::vector<SDL_Texture*> frames;
+
+    // Try loading frame 0 first (name-0)
+    SDL_Texture* frame0 = loadTexture(normalizedName + "-0");
+
+    if (frame0) {
+        // Found frame 0, load all subsequent frames
+        frames.push_back(frame0);
+        int frameIndex = 1;
+        while (true) {
+            SDL_Texture* frame = loadTexture(normalizedName + "-" + std::to_string(frameIndex));
+            if (!frame) break;
+            frames.push_back(frame);
+            frameIndex++;
+        }
+    } else {
+        // No frame 0, try loading single texture
+        SDL_Texture* single = loadTexture(normalizedName);
+        if (single) {
+            frames.push_back(single);
+        }
+    }
+
+    frameCache[normalizedName] = frames;
+    return frames;
+}
+
 // Get mania config for specified key count
 const ManiaConfig* SkinManager::getManiaConfig(int keyCount) const {
     return config.getManiaConfig(keyCount);
@@ -501,77 +603,206 @@ bool SkinManager::getTextureSize(SDL_Texture* tex, float* w, float* h) const {
     return false;
 }
 
-// Note texture getters
-SDL_Texture* SkinManager::getNoteTexture(int column, int keyCount) const {
-    const ManiaConfig* cfg = getManiaConfig(keyCount);
-    if (cfg && column < (int)cfg->noteImage.size() && !cfg->noteImage[column].empty()) {
-        return const_cast<SkinManager*>(this)->loadTexture(cfg->noteImage[column]);
+// Get default column type for fallback textures (1, 2, or S)
+// Based on osu! stable's default mania skin patterns
+static std::string getDefaultColumnType(int column, int keyCount) {
+    // osu! default column patterns by key count
+    static const char* patterns[] = {
+        "",                     // 0K (invalid)
+        "S",                    // 1K
+        "12",                   // 2K
+        "1S2",                  // 3K
+        "1221",                 // 4K
+        "12S21",                // 5K
+        "121121",               // 6K
+        "121S121",              // 7K
+        "1212S2121",            // 8K (with 2 special keys)
+        "12121S12121",          // 9K
+        "1212S1S2121",          // 10K
+    };
+
+    if (keyCount < 1 || keyCount > 10) {
+        // Fallback to alternating pattern for unsupported key counts
+        return std::to_string((column % 2) + 1);
     }
-    // Default fallback: try mania-note1, mania-note2 based on column pattern
-    // osu! uses alternating pattern: columns 0,2,4... use note1, columns 1,3,5... use note2
-    std::string defaultName = "mania-note" + std::to_string((column % 2) + 1);
-    return const_cast<SkinManager*>(this)->loadTexture(defaultName);
+
+    const char* pattern = patterns[keyCount];
+    if (column < 0 || column >= (int)strlen(pattern)) {
+        return std::to_string((column % 2) + 1);
+    }
+
+    char type = pattern[column];
+    if (type == 'S') return "S";
+    return std::string(1, type);
 }
 
-SDL_Texture* SkinManager::getNoteHeadTexture(int column, int keyCount) const {
+// Note texture getters (with multi-frame animation support)
+std::vector<SDL_Texture*> SkinManager::getNoteFrames(int column, int keyCount) const {
     const ManiaConfig* cfg = getManiaConfig(keyCount);
-    std::string headImageName;
+    std::string baseName;
 
-    if (cfg && column < (int)cfg->noteImageH.size() && !cfg->noteImageH[column].empty()) {
-        headImageName = cfg->noteImageH[column];
+    if (cfg && column < (int)cfg->noteImage.size() && !cfg->noteImage[column].empty()) {
+        baseName = cfg->noteImage[column];
     } else {
-        // Default fallback: mania-note1H, mania-note2H based on column pattern
-        headImageName = "mania-note" + std::to_string((column % 2) + 1) + "H";
+        // Default fallback based on osu! column type pattern
+        std::string colType = getDefaultColumnType(column, keyCount);
+        baseName = "mania-note" + colType;
     }
 
-    // Normalize path and check file size
-    std::string normalizedName = headImageName;
-    std::replace(normalizedName.begin(), normalizedName.end(), '\\', '/');
-    std::string filepath = findImageFile(normalizedName);
+    return const_cast<SkinManager*>(this)->loadTextureFrames(baseName);
+}
 
-    // If file exists and is too small (< 200 bytes), use body texture instead
+int SkinManager::getNoteFrameCount(int column, int keyCount) const {
+    return (int)getNoteFrames(column, keyCount).size();
+}
+
+SDL_Texture* SkinManager::getNoteTexture(int column, int keyCount, int frame) const {
+    auto frames = getNoteFrames(column, keyCount);
+    if (frames.empty()) return nullptr;
+    if (frame < 0 || frame >= (int)frames.size()) frame = 0;
+    return frames[frame];
+}
+
+std::vector<SDL_Texture*> SkinManager::getNoteHeadFrames(int column, int keyCount) const {
+    // Check cache first
+    std::string cacheKey = std::to_string(keyCount) + "_" + std::to_string(column);
+    auto cacheIt = noteHeadCache.find(cacheKey);
+    if (cacheIt != noteHeadCache.end()) {
+        return cacheIt->second;
+    }
+
+    const ManiaConfig* cfg = getManiaConfig(keyCount);
+    std::string baseName;
+
+    if (cfg && column < (int)cfg->noteImageH.size() && !cfg->noteImageH[column].empty()) {
+        baseName = cfg->noteImageH[column];
+    } else {
+        std::string colType = getDefaultColumnType(column, keyCount);
+        baseName = "mania-note" + colType + "H";
+    }
+
+    auto frames = const_cast<SkinManager*>(this)->loadTextureFrames(baseName);
+
+    // If head texture not found or too small, fallback to body texture
+    if (frames.empty()) {
+        auto result = getNoteBodyFrames(column, keyCount);
+        noteHeadCache[cacheKey] = result;
+        return result;
+    }
+
+    // Check if first frame file is too small (< 200 bytes)
+    std::string normalizedName = baseName;
+    std::replace(normalizedName.begin(), normalizedName.end(), '\\', '/');
+    std::string filepath = findImageFile(normalizedName + "-0");
+    if (filepath.empty()) {
+        filepath = findImageFile(normalizedName);
+    }
     if (!filepath.empty()) {
         try {
             auto fileSize = fs::file_size(filepath);
             if (fileSize < 200) {
-                static bool loggedOnce = false;
-                if (!loggedOnce) {
-                    SDL_Log("SkinManager: Head texture too small (%zu bytes), using body texture", fileSize);
-                    loggedOnce = true;
-                }
-                return getNoteBodyTexture(column, keyCount);
+                auto result = getNoteBodyFrames(column, keyCount);
+                noteHeadCache[cacheKey] = result;
+                return result;
             }
         } catch (...) {}
     }
 
-    SDL_Texture* tex = const_cast<SkinManager*>(this)->loadTexture(headImageName);
-    if (tex) return tex;
-
-    // Final fallback to regular note
-    return getNoteTexture(column, keyCount);
+    noteHeadCache[cacheKey] = frames;
+    return frames;
 }
 
-SDL_Texture* SkinManager::getNoteBodyTexture(int column, int keyCount) const {
+int SkinManager::getNoteHeadFrameCount(int column, int keyCount) const {
+    return (int)getNoteHeadFrames(column, keyCount).size();
+}
+
+SDL_Texture* SkinManager::getNoteHeadTexture(int column, int keyCount, int frame) const {
+    auto frames = getNoteHeadFrames(column, keyCount);
+    if (frames.empty()) {
+        // Final fallback to regular note
+        return getNoteTexture(column, keyCount, frame);
+    }
+    if (frame < 0 || frame >= (int)frames.size()) frame = 0;
+    return frames[frame];
+}
+
+// Get note body texture frames (multi-frame animation support)
+std::vector<SDL_Texture*> SkinManager::getNoteBodyFrames(int column, int keyCount) const {
     const ManiaConfig* cfg = getManiaConfig(keyCount);
+    std::string baseName;
+
     if (cfg && column < (int)cfg->noteImageL.size() && !cfg->noteImageL[column].empty()) {
-        return const_cast<SkinManager*>(this)->loadTexture(cfg->noteImageL[column]);
+        baseName = cfg->noteImageL[column];
+    } else {
+        std::string colType = getDefaultColumnType(column, keyCount);
+        baseName = "mania-note" + colType + "L";
     }
-    // Default fallback: mania-note1L, mania-note2L based on column pattern
-    std::string defaultName = "mania-note" + std::to_string((column % 2) + 1) + "L";
-    return const_cast<SkinManager*>(this)->loadTexture(defaultName);
+
+    return const_cast<SkinManager*>(this)->loadTextureFrames(baseName);
 }
 
-SDL_Texture* SkinManager::getNoteTailTexture(int column, int keyCount) const {
-    const ManiaConfig* cfg = getManiaConfig(keyCount);
-    if (cfg && column < (int)cfg->noteImageT.size() && !cfg->noteImageT[column].empty()) {
-        return const_cast<SkinManager*>(this)->loadTexture(cfg->noteImageT[column]);
+int SkinManager::getNoteBodyFrameCount(int column, int keyCount) const {
+    return (int)getNoteBodyFrames(column, keyCount).size();
+}
+
+SDL_Texture* SkinManager::getNoteBodyTexture(int column, int keyCount, int frame) const {
+    auto frames = getNoteBodyFrames(column, keyCount);
+    if (frames.empty()) return nullptr;
+    if (frame < 0 || frame >= (int)frames.size()) frame = 0;
+    return frames[frame];
+}
+
+std::vector<SDL_Texture*> SkinManager::getNoteTailFrames(int column, int keyCount) const {
+    // Check cache first
+    std::string cacheKey = std::to_string(keyCount) + "_" + std::to_string(column);
+    auto cacheIt = noteTailCache.find(cacheKey);
+    if (cacheIt != noteTailCache.end()) {
+        return cacheIt->second;
     }
-    // Default fallback: mania-note1T, mania-note2T based on column pattern
-    std::string defaultName = "mania-note" + std::to_string((column % 2) + 1) + "T";
-    SDL_Texture* tex = const_cast<SkinManager*>(this)->loadTexture(defaultName);
-    if (tex) return tex;
-    // Final fallback to Hold head texture (not regular note)
-    return getNoteHeadTexture(column, keyCount);
+
+    const ManiaConfig* cfg = getManiaConfig(keyCount);
+    std::string baseName;
+
+    if (cfg && column < (int)cfg->noteImageT.size() && !cfg->noteImageT[column].empty()) {
+        baseName = cfg->noteImageT[column];
+    } else {
+        std::string colType = getDefaultColumnType(column, keyCount);
+        baseName = "mania-note" + colType + "T";
+    }
+
+    auto frames = const_cast<SkinManager*>(this)->loadTextureFrames(baseName);
+
+    // If tail texture not found, fallback to head texture
+    if (frames.empty()) {
+        auto result = getNoteHeadFrames(column, keyCount);
+        noteTailCache[cacheKey] = result;
+        return result;
+    }
+
+    noteTailCache[cacheKey] = frames;
+    return frames;
+}
+
+int SkinManager::getNoteTailFrameCount(int column, int keyCount) const {
+    return (int)getNoteTailFrames(column, keyCount).size();
+}
+
+SDL_Texture* SkinManager::getNoteTailTexture(int column, int keyCount, int frame) const {
+    auto frames = getNoteTailFrames(column, keyCount);
+    if (frames.empty()) return nullptr;
+    if (frame < 0 || frame >= (int)frames.size()) frame = 0;
+    return frames[frame];
+}
+
+// Animation frame interval calculation
+float SkinManager::getNoteFrameInterval(int frameCount) const {
+    if (config.animationFramerate > 0) {
+        return 1000.0f / config.animationFramerate;
+    }
+    if (frameCount > 1) {
+        return 1000.0f / frameCount;  // 1 second for all frames
+    }
+    return 16.666667f;  // Default ~60fps
 }
 
 // Key texture getters
@@ -580,8 +811,9 @@ SDL_Texture* SkinManager::getKeyTexture(int column, int keyCount) const {
     if (cfg && column < (int)cfg->keyImage.size() && !cfg->keyImage[column].empty()) {
         return const_cast<SkinManager*>(this)->loadTexture(cfg->keyImage[column]);
     }
-    // Default fallback: mania-key1, mania-key2 based on column pattern
-    std::string defaultName = "mania-key" + std::to_string((column % 2) + 1);
+    // Default fallback based on osu! column type pattern
+    std::string colType = getDefaultColumnType(column, keyCount);
+    std::string defaultName = "mania-key" + colType;
     return const_cast<SkinManager*>(this)->loadTexture(defaultName);
 }
 
@@ -590,12 +822,23 @@ SDL_Texture* SkinManager::getKeyDownTexture(int column, int keyCount) const {
     if (cfg && column < (int)cfg->keyImageD.size() && !cfg->keyImageD[column].empty()) {
         return const_cast<SkinManager*>(this)->loadTexture(cfg->keyImageD[column]);
     }
-    // Default fallback: mania-key1D, mania-key2D based on column pattern
-    std::string defaultName = "mania-key" + std::to_string((column % 2) + 1) + "D";
+    // Default fallback based on osu! column type pattern
+    std::string colType = getDefaultColumnType(column, keyCount);
+    std::string defaultName = "mania-key" + colType + "D";
     SDL_Texture* tex = const_cast<SkinManager*>(this)->loadTexture(defaultName);
     if (tex) return tex;
     // Final fallback to key up texture
     return getKeyTexture(column, keyCount);
+}
+
+bool SkinManager::hasCustomKeyImage(int keyCount) const {
+    const ManiaConfig* cfg = getManiaConfig(keyCount);
+    if (cfg && !cfg->keyImage.empty()) {
+        for (const auto& img : cfg->keyImage) {
+            if (!img.empty()) return true;
+        }
+    }
+    return false;
 }
 
 // Stage texture getters
@@ -623,21 +866,55 @@ SDL_Texture* SkinManager::getStageLightTexture() const {
     return const_cast<SkinManager*>(this)->loadTexture("mania-stage-light");
 }
 
-// Lighting texture getters
-SDL_Texture* SkinManager::getLightingNTexture(int keyCount) const {
+// Lighting texture getters (with multi-frame animation support)
+std::vector<SDL_Texture*> SkinManager::getLightingNFrames(int keyCount) const {
     const ManiaConfig* cfg = getManiaConfig(keyCount);
+    std::string baseName;
     if (cfg && !cfg->lightingN.empty()) {
-        return const_cast<SkinManager*>(this)->loadTexture(cfg->lightingN);
+        baseName = cfg->lightingN;
+    } else {
+        baseName = "lightingN";
     }
-    return const_cast<SkinManager*>(this)->loadTexture("lightingN");
+    return const_cast<SkinManager*>(this)->loadTextureFrames(baseName);
 }
 
-SDL_Texture* SkinManager::getLightingLTexture(int keyCount) const {
+int SkinManager::getLightingNFrameCount(int keyCount) const {
+    return (int)getLightingNFrames(keyCount).size();
+}
+
+SDL_Texture* SkinManager::getLightingNTexture(int keyCount, int frame) const {
+    auto frames = getLightingNFrames(keyCount);
+    if (frames.empty()) return nullptr;
+    if (frame < 0 || frame >= (int)frames.size()) frame = 0;
+    return frames[frame];
+}
+
+std::vector<SDL_Texture*> SkinManager::getLightingLFrames(int keyCount) const {
     const ManiaConfig* cfg = getManiaConfig(keyCount);
+    std::string baseName;
     if (cfg && !cfg->lightingL.empty()) {
-        return const_cast<SkinManager*>(this)->loadTexture(cfg->lightingL);
+        baseName = cfg->lightingL;
+    } else {
+        baseName = "lightingL";
     }
-    return const_cast<SkinManager*>(this)->loadTexture("lightingL");
+    auto frames = const_cast<SkinManager*>(this)->loadTextureFrames(baseName);
+
+    // Fallback to LightingN if LightingL not found
+    if (frames.empty()) {
+        return getLightingNFrames(keyCount);
+    }
+    return frames;
+}
+
+int SkinManager::getLightingLFrameCount(int keyCount) const {
+    return (int)getLightingLFrames(keyCount).size();
+}
+
+SDL_Texture* SkinManager::getLightingLTexture(int keyCount, int frame) const {
+    auto frames = getLightingLFrames(keyCount);
+    if (frames.empty()) return nullptr;
+    if (frame < 0 || frame >= (int)frames.size()) frame = 0;
+    return frames[frame];
 }
 
 // Judgement texture getter
@@ -722,4 +999,16 @@ SDL_Texture* SkinManager::getScorebarKiDanger2Texture() const {
 
 SDL_Texture* SkinManager::getScorebarMarkerTexture() const {
     return const_cast<SkinManager*>(this)->loadTexture("scorebar-marker");
+}
+
+bool SkinManager::hasCustomScorebarColour() const {
+    // Check if scorebar-colour exists in skin folder (not default)
+    std::string path = findImageFile("scorebar-colour");
+    return !path.empty();
+}
+
+bool SkinManager::hasScorebarMarker() const {
+    // Check if scorebar-marker exists in skin folder
+    std::string path = findImageFile("scorebar-marker");
+    return !path.empty();
 }

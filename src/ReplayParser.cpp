@@ -7,6 +7,10 @@
 #include <algorithm>
 #include <set>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 // LZMA decoder
 #include "LzmaDec.h"
 
@@ -169,7 +173,15 @@ void ReplayParser::parseFrames(const std::string& data, std::vector<ReplayFrame>
 }
 
 bool ReplayParser::parse(const std::string& filepath, ReplayInfo& info) {
+#ifdef _WIN32
+    // Convert UTF-8 path to wide string for Windows
+    int wideLen = MultiByteToWideChar(CP_UTF8, 0, filepath.c_str(), -1, nullptr, 0);
+    std::wstring widePath(wideLen - 1, 0);
+    MultiByteToWideChar(CP_UTF8, 0, filepath.c_str(), -1, &widePath[0], wideLen);
+    std::ifstream file(widePath, std::ios::binary);
+#else
     std::ifstream file(filepath, std::ios::binary);
+#endif
     if (!file) {
         std::cerr << "Failed to open replay file: " << filepath << std::endl;
         return false;

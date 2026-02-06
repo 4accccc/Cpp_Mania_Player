@@ -137,6 +137,12 @@ bool ReplayWriter::write(const std::string& filepath,
     // Build frame string
     std::ostringstream frameStr;
     int64_t lastTime = 0;
+
+    // Add initial frame at time 0 with no keys pressed (required by osu!)
+    if (!frames.empty() && frames[0].time > 0) {
+        frameStr << "0|0|0|0,";
+    }
+
     for (const auto& frame : frames) {
         int64_t w = frame.time - lastTime;
         frameStr << w << "|" << frame.keyState << "|0|0,";

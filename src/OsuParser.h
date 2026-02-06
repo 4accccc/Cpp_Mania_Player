@@ -44,6 +44,7 @@ class OsuParser {
 public:
     static bool parse(const std::string& filepath, BeatmapInfo& info);
     static bool isMania(const BeatmapInfo& info);
+    static std::string calculateMD5(const std::string& filepath);
 
 private:
     static int xToLane(int x, int keyCount);

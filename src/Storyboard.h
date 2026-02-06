@@ -172,6 +172,7 @@ public:
     bool hasStoryboard() const;
     bool hasBackground() const;
     const std::string& getBackgroundImage() const { return backgroundImage; }
+    void setBackgroundImage(const std::string& path) { backgroundImage = path; }
 
 private:
     std::string beatmapDir;
