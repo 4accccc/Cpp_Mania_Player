@@ -1516,7 +1516,11 @@ void Game::handleInput() {
                     case SDLK_KP_ENTER:
                         if (pauseMenuSelection == 0) {
                             // Resume with fade out (audio resumes after fade completes)
-                            // Don't adjust startTime yet - wait for fade out to complete
+                            // For keysound-only maps, adjust startTime immediately to prevent time jump
+                            if (!hasBackgroundMusic) {
+                                int64_t pausedDuration = SDL_GetTicks() - pauseTime;
+                                startTime += pausedDuration;
+                            }
                             pauseFadingOut = true;
                             pauseFadeOutStart = SDL_GetTicks();
                             state = GameState::Playing;
@@ -1542,7 +1546,11 @@ void Game::handleInput() {
                         break;
                     case SDLK_ESCAPE: {
                         // ESC also resumes with fade out
-                        // Don't adjust startTime yet - wait for fade out to complete
+                        // For keysound-only maps, adjust startTime immediately to prevent time jump
+                        if (!hasBackgroundMusic) {
+                            int64_t pausedDuration = SDL_GetTicks() - pauseTime;
+                            startTime += pausedDuration;
+                        }
                         pauseFadingOut = true;
                         pauseFadeOutStart = SDL_GetTicks();
                         state = GameState::Playing;
@@ -1599,7 +1607,11 @@ void Game::handleInput() {
             else if (state == GameState::Playing && !e.key.repeat) {
                 switch (e.key.key) {
                     case SDLK_ESCAPE:
-                        pauseGameTime = getCurrentGameTime();  // Save game time before pausing
+                        // If already fading out from previous resume, keep the frozen pauseGameTime
+                        if (!pauseFadingOut) {
+                            pauseGameTime = getCurrentGameTime();
+                        }
+                        pauseFadingOut = false;  // Cancel any ongoing fade out
                         audio.pause();
                         audio.pauseAllSamples();
                         pauseTime = SDL_GetTicks();
@@ -1717,7 +1729,10 @@ void Game::update() {
 
     // For keysound-only maps, use system time instead of audio position
     int64_t currentTime;
-    if (!musicStarted) {
+    // During pause fade out, freeze game time to prevent miss judgements
+    if (pauseFadingOut) {
+        currentTime = pauseGameTime;
+    } else if (!musicStarted) {
         // Prepare phase: scale time so note fall speed matches gameplay
         currentTime = static_cast<int64_t>((elapsed - PREPARE_TIME) * clockRate);
     } else if (hasBackgroundMusic) {
@@ -3047,12 +3062,15 @@ void Game::render() {
             } else {
                 // Fade out complete, now adjust time and resume audio
                 pauseFadingOut = false;
-                // Add total paused duration (including fade out) to startTime
-                int64_t totalPausedDuration = SDL_GetTicks() - pauseTime;
-                startTime += totalPausedDuration;
-                // Calculate offset to correct audio position drift
                 if (hasBackgroundMusic) {
+                    // For BGM maps, adjust startTime now
+                    int64_t totalPausedDuration = SDL_GetTicks() - pauseTime;
+                    startTime += totalPausedDuration;
                     pauseAudioOffset = pauseGameTime - (audio.getPosition() + settings.audioOffset);
+                } else {
+                    // For keysound-only maps, add fadeout duration to startTime
+                    int64_t fadeoutDuration = SDL_GetTicks() - pauseFadeOutStart;
+                    startTime += fadeoutDuration;
                 }
                 audio.resume();
                 audio.resumeAllSamples();
@@ -3463,6 +3481,10 @@ void Game::processJudgement(Judgement j, int lane) {
 }
 
 int64_t Game::getCurrentGameTime() const {
+    // During pause fade out, return frozen game time
+    if (pauseFadingOut) {
+        return pauseGameTime;
+    }
     int64_t elapsed = SDL_GetTicks() - startTime;
     if (!musicStarted) {
         return static_cast<int64_t>((elapsed - PREPARE_TIME) * clockRate);
@@ -3475,6 +3497,10 @@ int64_t Game::getCurrentGameTime() const {
 }
 
 int64_t Game::getRenderTime() const {
+    // During pause fade out, return frozen game time
+    if (pauseFadingOut) {
+        return pauseGameTime;
+    }
     int64_t elapsed = SDL_GetTicks() - startTime;
     if (!musicStarted) {
         return static_cast<int64_t>((elapsed - PREPARE_TIME) * clockRate);
