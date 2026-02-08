@@ -1,0 +1,6 @@
+  # BASS
+  **/bass
+  **/**/bass.lib
+  **/**/bass_fx.lib
+  bass.dll
+  bass_fx.dll
