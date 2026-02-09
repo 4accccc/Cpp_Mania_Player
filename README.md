@@ -108,6 +108,18 @@ This project uses the following third-party libraries:
 
 
 
+### Mania Player v0.0.4b
+
+- 修复了导出回放到osu!时，一些mod启用状态信息没有被包含进回放文件的问题
+- 修复了启用Double Time时key音会被错误升调
+- 新增 Replay Factory 功能
+- 新增 Replay Mod 信息修改
+- 新增 Replay 元信息修改
+- 新增 Replay Analyze 功能 (实现了 Press Distribution 和 Realtime Press 图表显示，基于 [Transcendence](https://github.com/adgjl7777777) 的 [VSRG_Total_Analyzer](https://github.com/adgjl7777777/VSRG_Total_Analyzer) )
+- 新增 Replay 可视化视频输出 (基于 [kuit](https://github.com/Keytoyze) 的 [Mania-Replay-Master](https://github.com/Keytoyze/Mania-Replay-Master) )
+
+
+
 ## Building
 
 1. Download BASS and BASS_FX from https://www.un4seen.com/

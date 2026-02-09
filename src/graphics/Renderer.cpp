@@ -1965,7 +1965,7 @@ void Renderer::renderMenu() {
         SDL_DestroySurface(s);
     }
 
-    const char* version = "Version 0.0.3a";
+    const char* version = "Version 0.0.4b";
     s = TTF_RenderText_Blended(font, version, strlen(version), white);
     if (s) {
         SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
@@ -2225,6 +2225,23 @@ void Renderer::renderText(const char* text, float x, float y) {
         SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
         SDL_FRect dst = {x, y, (float)s->w, (float)s->h};
         SDL_RenderTexture(renderer, t, nullptr, &dst);
+        SDL_DestroyTexture(t);
+        SDL_DestroySurface(s);
+    }
+}
+
+void Renderer::renderTextClipped(const char* text, float x, float y, float maxWidth) {
+    if (!font || !text || maxWidth <= 0) return;
+    SDL_Color white = {255, 255, 255, 255};
+    SDL_Surface* s = TTF_RenderText_Blended(font, text, strlen(text), white);
+    if (s) {
+        SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
+        float srcW = (float)s->w;
+        float srcH = (float)s->h;
+        float dstW = srcW > maxWidth ? maxWidth : srcW;
+        SDL_FRect src = {0, 0, dstW, srcH};
+        SDL_FRect dst = {x, y, dstW, srcH};
+        SDL_RenderTexture(renderer, t, &src, &dst);
         SDL_DestroyTexture(t);
         SDL_DestroySurface(s);
     }
@@ -2544,9 +2561,11 @@ bool Renderer::renderColorBox(NoteColor color, float x, float y, float size, int
 }
 
 bool Renderer::renderTextInput(const char* label, std::string& text, float x, float y, float w,
-                                int mouseX, int mouseY, bool clicked, bool& editing) {
+                                int mouseX, int mouseY, bool clicked, bool& editing, int& cursorPos) {
     float h = 30;
     float labelOffset = 0;
+    float padding = 8;
+    float contentWidth = w - padding * 2;
 
     // Render label if provided
     if (label && font) {
@@ -2566,24 +2585,80 @@ bool Renderer::renderTextInput(const char* label, std::string& text, float x, fl
     SDL_SetRenderDrawColor(renderer, editing ? 150 : 100, editing ? 150 : 100, editing ? 200 : 130, 255);
     SDL_RenderRect(renderer, &inputRect);
 
-    // Text content
+    // Text content with cursor and scrolling
     if (font) {
-        std::string displayText = text.empty() ? "..." : text;
-        if (editing) displayText += "_";  // Cursor
         SDL_Color white = {255, 255, 255, 255};
-        SDL_Surface* s = TTF_RenderText_Blended(font, displayText.c_str(), displayText.length(), white);
-        if (s) {
-            SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
-            SDL_FRect dst = {x + 8, inputY + (h - s->h) / 2, (float)s->w, (float)s->h};
-            SDL_RenderTexture(renderer, t, nullptr, &dst);
-            SDL_DestroyTexture(t);
-            SDL_DestroySurface(s);
+
+        if (text.empty() && !editing) {
+            // Show placeholder
+            SDL_Surface* s = TTF_RenderText_Blended(font, "...", 3, white);
+            if (s) {
+                SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
+                SDL_FRect dst = {x + padding, inputY + (h - s->h) / 2, (float)s->w, (float)s->h};
+                SDL_RenderTexture(renderer, t, nullptr, &dst);
+                SDL_DestroyTexture(t);
+                SDL_DestroySurface(s);
+            }
+        } else {
+            // Calculate cursor position in pixels
+            float cursorPixelX = 0;
+            if (cursorPos > 0 && !text.empty()) {
+                std::string beforeCursor = text.substr(0, cursorPos);
+                SDL_Surface* s = TTF_RenderText_Blended(font, beforeCursor.c_str(), beforeCursor.length(), white);
+                if (s) {
+                    cursorPixelX = (float)s->w;
+                    SDL_DestroySurface(s);
+                }
+            }
+
+            // Calculate scroll offset to keep cursor visible
+            static float scrollOffset = 0;
+            if (editing) {
+                if (cursorPixelX - scrollOffset > contentWidth - 10) {
+                    scrollOffset = cursorPixelX - contentWidth + 10;
+                }
+                if (cursorPixelX - scrollOffset < 0) {
+                    scrollOffset = cursorPixelX;
+                }
+            } else {
+                scrollOffset = 0;
+            }
+
+            // Set clip rect to input box area
+            SDL_Rect clipRect = {(int)(x + padding), (int)inputY, (int)contentWidth, (int)h};
+            SDL_SetRenderClipRect(renderer, &clipRect);
+
+            // Render full text
+            if (!text.empty()) {
+                SDL_Surface* s = TTF_RenderText_Blended(font, text.c_str(), text.length(), white);
+                if (s) {
+                    SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
+                    SDL_FRect dst = {x + padding - scrollOffset, inputY + (h - s->h) / 2, (float)s->w, (float)s->h};
+                    SDL_RenderTexture(renderer, t, nullptr, &dst);
+                    SDL_DestroyTexture(t);
+                    SDL_DestroySurface(s);
+                }
+            }
+
+            // Render cursor if editing
+            if (editing) {
+                float cursorScreenX = x + padding + cursorPixelX - scrollOffset;
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+                SDL_FRect cursorRect = {cursorScreenX, inputY + 5, 2, h - 10};
+                SDL_RenderFillRect(renderer, &cursorRect);
+            }
+
+            // Clear clip rect
+            SDL_SetRenderClipRect(renderer, nullptr);
         }
     }
 
     // Toggle editing on click
     if (clicked) {
         if (hover) {
+            if (!editing) {
+                cursorPos = (int)text.length();
+            }
             editing = true;
         } else {
             editing = false;
@@ -2591,4 +2666,228 @@ bool Renderer::renderTextInput(const char* label, std::string& text, float x, fl
     }
 
     return editing;
+}
+
+void Renderer::renderAnalysisChart(const AnalysisResult& result, int chartType, float x, float y, float w, float h) {
+    if (result.pressDistributions.empty()) return;
+
+    // Colors for each key (HSV to RGB)
+    auto getKeyColor = [](int keyIndex, int keyCount) -> SDL_Color {
+        float hue = (float)keyIndex / keyCount;
+        float r, g, b;
+        int i = (int)(hue * 6);
+        float f = hue * 6 - i;
+        float q = 1 - f;
+        switch (i % 6) {
+            case 0: r = 1; g = f; b = 0; break;
+            case 1: r = q; g = 1; b = 0; break;
+            case 2: r = 0; g = 1; b = f; break;
+            case 3: r = 0; g = q; b = 1; break;
+            case 4: r = f; g = 0; b = 1; break;
+            default: r = 1; g = 0; b = q; break;
+        }
+        return {(Uint8)(r * 255), (Uint8)(g * 255), (Uint8)(b * 255), 255};
+    };
+
+    int keyCount = result.keyCount;
+
+    if (chartType == 0) {
+        // Press Time Distribution chart
+        // Find max values for scaling
+        int maxTime = 160;  // Max display time (ms)
+        int maxCount = 1;
+        for (const auto& dist : result.pressDistributions) {
+            for (size_t i = 0; i < dist.presscount.size() && i < (size_t)maxTime; i++) {
+                maxCount = std::max(maxCount, dist.presscount[i]);
+            }
+        }
+
+        // Draw grid lines and tick marks
+        SDL_SetRenderDrawColor(renderer, 60, 60, 60, 255);  // Dark gray for grid
+
+        // X-axis ticks (every 40ms)
+        for (int t = 0; t <= maxTime; t += 40) {
+            float px = x + (float)t / maxTime * w;
+            // Grid line
+            if (t > 0 && t < maxTime) {
+                SDL_RenderLine(renderer, px, y, px, y + h);
+            }
+            // Tick mark
+            SDL_SetRenderDrawColor(renderer, 150, 150, 150, 255);
+            SDL_RenderLine(renderer, px, y + h, px, y + h + 5);
+            SDL_SetRenderDrawColor(renderer, 60, 60, 60, 255);
+        }
+
+        // Y-axis ticks (4 divisions)
+        int yDivisions = 4;
+        for (int i = 0; i <= yDivisions; i++) {
+            float py = y + h - (float)i / yDivisions * h;
+            // Grid line
+            if (i > 0 && i < yDivisions) {
+                SDL_RenderLine(renderer, x, py, x + w, py);
+            }
+            // Tick mark
+            SDL_SetRenderDrawColor(renderer, 150, 150, 150, 255);
+            SDL_RenderLine(renderer, x - 5, py, x, py);
+            SDL_SetRenderDrawColor(renderer, 60, 60, 60, 255);
+        }
+
+        // Draw axes
+        SDL_SetRenderDrawColor(renderer, 150, 150, 150, 255);
+        SDL_RenderLine(renderer, x, y + h, x + w, y + h);  // X axis
+        SDL_RenderLine(renderer, x, y, x, y + h);          // Y axis
+
+        // Draw axis labels
+        char maxLabel[32];
+        snprintf(maxLabel, sizeof(maxLabel), "%d", maxCount);
+        renderText(maxLabel, x - 40, y);
+        renderText("0", x - 15, y + h + 5);  // Only one label at origin
+        renderText("160ms", x + w - 40, y + h + 5);
+
+        // Draw axis names at bottom center
+        char axisInfo[128];
+        snprintf(axisInfo, sizeof(axisInfo), "Y-Axis: Count,  X-Axis: Press Time (ms)");
+        renderText(axisInfo, x + w / 2 - 130, y + h + 25);
+
+        // Draw lines for each key
+        for (int k = 0; k < keyCount; k++) {
+            if (k >= (int)result.pressDistributions.size()) break;
+            const auto& dist = result.pressDistributions[k];
+            SDL_Color color = getKeyColor(k, keyCount);
+            SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
+
+            float prevX = x, prevY = y + h;
+            for (size_t i = 0; i < dist.presscount.size() && i < (size_t)maxTime; i++) {
+                float px = x + (float)i / maxTime * w;
+                float py = y + h - (float)dist.presscount[i] / maxCount * h;
+                if (i > 0) {
+                    SDL_RenderLine(renderer, prevX, prevY, px, py);
+                }
+                prevX = px;
+                prevY = py;
+            }
+        }
+
+        // Draw legend in top-right corner
+        float legendX = x + w - 80;
+        float legendY = y + 5;
+        for (int k = 0; k < keyCount; k++) {
+            SDL_Color color = getKeyColor(k, keyCount);
+            SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
+            SDL_FRect colorBox = {legendX, legendY + k * 18, 12, 12};
+            SDL_RenderFillRect(renderer, &colorBox);
+            char label[16];
+            snprintf(label, sizeof(label), "Key %d", k + 1);
+            renderText(label, legendX + 16, legendY + k * 18 - 2);
+        }
+    }
+    else if (chartType == 1) {
+        // Realtime Press Time chart
+        float maxTime = result.maxGameTime > 0 ? result.maxGameTime : 1;
+        float maxPress = 160;
+
+        // Draw grid lines and tick marks
+        SDL_SetRenderDrawColor(renderer, 60, 60, 60, 255);  // Dark gray for grid
+
+        // X-axis ticks (5 divisions based on maxTime)
+        int xDivisions = 5;
+        for (int i = 0; i <= xDivisions; i++) {
+            float px = x + (float)i / xDivisions * w;
+            // Grid line
+            if (i > 0 && i < xDivisions) {
+                SDL_RenderLine(renderer, px, y, px, y + h);
+            }
+            // Tick mark
+            SDL_SetRenderDrawColor(renderer, 150, 150, 150, 255);
+            SDL_RenderLine(renderer, px, y + h, px, y + h + 5);
+            SDL_SetRenderDrawColor(renderer, 60, 60, 60, 255);
+        }
+
+        // Y-axis ticks (every 40ms)
+        for (int t = 0; t <= (int)maxPress; t += 40) {
+            float py = y + h - (float)t / maxPress * h;
+            // Grid line
+            if (t > 0 && t < (int)maxPress) {
+                SDL_RenderLine(renderer, x, py, x + w, py);
+            }
+            // Tick mark
+            SDL_SetRenderDrawColor(renderer, 150, 150, 150, 255);
+            SDL_RenderLine(renderer, x - 5, py, x, py);
+            SDL_SetRenderDrawColor(renderer, 60, 60, 60, 255);
+        }
+
+        // Draw axes
+        SDL_SetRenderDrawColor(renderer, 150, 150, 150, 255);
+        SDL_RenderLine(renderer, x, y + h, x + w, y + h);
+        SDL_RenderLine(renderer, x, y, x, y + h);
+
+        // Draw axis labels
+        renderText("160ms", x - 45, y);
+        renderText("0", x - 15, y + h + 5);  // Only one label at origin
+        char maxTimeLabel[32];
+        snprintf(maxTimeLabel, sizeof(maxTimeLabel), "%.0fs", maxTime);
+        renderText(maxTimeLabel, x + w - 30, y + h + 5);
+
+        // Draw axis names at bottom center
+        char axisInfo[128];
+        snprintf(axisInfo, sizeof(axisInfo), "Y-Axis: Press Time (ms),  X-Axis: Play Time (s)");
+        renderText(axisInfo, x + w / 2 - 150, y + h + 25);
+
+        // Draw points for each key
+        for (int k = 0; k < keyCount; k++) {
+            if (k >= (int)result.realtimePress.size()) break;
+            const auto& points = result.realtimePress[k];
+            SDL_Color color = getKeyColor(k, keyCount);
+            SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 200);
+
+            for (const auto& pt : points) {
+                float px = x + pt.gameTime / maxTime * w;
+                float py = y + h - std::min(pt.pressTime, maxPress) / maxPress * h;
+                SDL_FRect dot = {px - 1, py - 1, 3, 3};
+                SDL_RenderFillRect(renderer, &dot);
+            }
+        }
+
+        // Draw legend in top-right corner
+        float legendX = x + w - 80;
+        float legendY = y + 5;
+        for (int k = 0; k < keyCount; k++) {
+            SDL_Color color = getKeyColor(k, keyCount);
+            SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
+            SDL_FRect colorBox = {legendX, legendY + k * 18, 12, 12};
+            SDL_RenderFillRect(renderer, &colorBox);
+            char label[16];
+            snprintf(label, sizeof(label), "Key %d", k + 1);
+            renderText(label, legendX + 16, legendY + k * 18 - 2);
+        }
+    }
+}
+
+bool Renderer::saveAnalysisChart(const AnalysisResult& result, int chartType, const std::string& path, int width, int height) {
+    // Create a texture to render to
+    SDL_Texture* target = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
+                                            SDL_TEXTUREACCESS_TARGET, width, height);
+    if (!target) return false;
+
+    // Set render target
+    SDL_SetRenderTarget(renderer, target);
+
+    // Clear with dark background
+    SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
+    SDL_RenderClear(renderer);
+
+    // Render chart
+    float margin = 50;
+    renderAnalysisChart(result, chartType, margin, margin, width - margin * 2, height - margin * 2);
+
+    // Read pixels and save
+    SDL_Surface* surface = SDL_RenderReadPixels(renderer, nullptr);
+    SDL_SetRenderTarget(renderer, nullptr);
+    SDL_DestroyTexture(target);
+
+    if (!surface) return false;
+
+    bool success = SDL_SaveBMP(surface, path.c_str());
+    SDL_DestroySurface(surface);
+    return success;
 }

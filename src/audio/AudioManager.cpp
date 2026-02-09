@@ -212,8 +212,8 @@ void AudioManager::playSample(int handle, int volume) {
     float finalVolume = (volume / 100.0f) * (sampleVolume / 100.0f);
     BASS_ChannelSetAttribute(channel, BASS_ATTRIB_VOL, finalVolume);
 
-    // Apply tempo if needed
-    if (playbackRate != 1.0f) {
+    // Apply tempo if needed (only change pitch if changePitch is true)
+    if (playbackRate != 1.0f && changePitch) {
         // Get original frequency and scale it
         float origFreq;
         BASS_ChannelGetAttribute(channel, BASS_ATTRIB_FREQ, &origFreq);

@@ -6,6 +6,7 @@
 #include "Note.h"
 #include "Settings.h"
 #include "OsuParser.h"
+#include "ReplayAnalyzer.h"
 
 class SkinManager;
 
@@ -59,6 +60,7 @@ public:
     void renderCategoryButton(const char* text, float x, float y, float w, float h, bool selected);
     void renderKeyBindingUI(SDL_Keycode* keys, int keyCount, int currentIndex);
     void renderText(const char* text, float x, float y);
+    void renderTextClipped(const char* text, float x, float y, float maxWidth);
     void renderLabel(const char* text, float x, float y);
     int renderDropdown(const char* label, const char** options, int optionCount, int selected, float x, float y, float w, int mouseX, int mouseY, bool clicked, bool& expanded);
     bool renderRadioButton(const char* label, bool selected, float x, float y, int mouseX, int mouseY, bool clicked);
@@ -67,7 +69,7 @@ public:
     void renderPauseMenu(int selection, float alpha = 1.0f);
     void renderDeathMenu(int selection, float slowdown, float alpha = 1.0f);
     void renderSkipPrompt();  // "Press Space to skip..." prompt
-    bool renderTextInput(const char* label, std::string& text, float x, float y, float w, int mouseX, int mouseY, bool clicked, bool& editing);
+    bool renderTextInput(const char* label, std::string& text, float x, float y, float w, int mouseX, int mouseY, bool clicked, bool& editing, int& cursorPos);
 
     // Color box for settings
     bool renderColorBox(NoteColor color, float x, float y, float size, int mouseX, int mouseY, bool clicked);
@@ -75,6 +77,10 @@ public:
 
     SDL_Window* getWindow() { return window; }
     SDL_Renderer* getRenderer() { return renderer; }
+
+    // Analysis chart rendering
+    void renderAnalysisChart(const AnalysisResult& result, int chartType, float x, float y, float w, float h);
+    bool saveAnalysisChart(const AnalysisResult& result, int chartType, const std::string& path, int width, int height);
 
     void setResolution(int width, int height);
     void setVSync(bool enabled);

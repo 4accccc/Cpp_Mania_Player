@@ -9,6 +9,7 @@
 #include "BMSParser.h"
 #include "StarRating.h"
 #include "SongIndex.h"
+#include "OsuMods.h"
 #include "stb_image.h"
 #include <SDL3/SDL.h>
 #include <iostream>
@@ -292,6 +293,27 @@ std::string Game::saveReplayDialog() {
     ofn.lpstrDefExt = L"osr";
     if (GetSaveFileNameW(&ofn)) {
         // Convert wchar_t to UTF-8
+        int size = WideCharToMultiByte(CP_UTF8, 0, filename, -1, nullptr, 0, nullptr, nullptr);
+        std::string result(size - 1, 0);
+        WideCharToMultiByte(CP_UTF8, 0, filename, -1, &result[0], size, nullptr, nullptr);
+        return result;
+    }
+#endif
+    return "";
+}
+
+std::string Game::saveImageDialog() {
+#ifdef _WIN32
+    wchar_t filename[MAX_PATH] = L"analysis.png";
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = NULL;
+    ofn.lpstrFilter = L"PNG Image (*.png)\0*.png\0All Files\0*.*\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = L"png";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+    if (GetSaveFileNameW(&ofn)) {
         int size = WideCharToMultiByte(CP_UTF8, 0, filename, -1, nullptr, 0, nullptr, nullptr);
         std::string result(size - 1, 0);
         WideCharToMultiByte(CP_UTF8, 0, filename, -1, &result[0], size, nullptr, nullptr);
@@ -1373,6 +1395,25 @@ void Game::handleInput() {
                     scrollSpeedInput += c;
                 }
             }
+            // Replay Factory text input
+            if (state == GameState::ReplayFactory) {
+                std::string* editStr = nullptr;
+                size_t maxLen = 0;
+                if (editingPlayerName) { editStr = &factoryReplayInfo.playerName; maxLen = 32; }
+                else if (editingTimestamp) { editStr = &factoryTimestampStr; maxLen = 32; }
+                else if (editingJudgements) { editStr = &factoryJudgementsStr; maxLen = 64; }
+                else if (editingScore) { editStr = &factoryScoreStr; maxLen = 16; }
+                else if (editingCombo) { editStr = &factoryComboStr; maxLen = 8; }
+                else if (editingBlockHeight) { editStr = &blockHeightInput; maxLen = 4; }
+                else if (editingVideoWidth) { editStr = &videoWidthInput; maxLen = 4; }
+                else if (editingVideoHeight) { editStr = &videoHeightInput; maxLen = 4; }
+                else if (editingVideoFPS) { editStr = &videoFPSInput; maxLen = 3; }
+
+                if (editStr && editStr->length() < maxLen) {
+                    editStr->insert(cursorPos, e.text.text);
+                    cursorPos += strlen(e.text.text);
+                }
+            }
         }
         else if (e.type == SDL_EVENT_KEY_DOWN) {
             if (state == GameState::Menu) {
@@ -1483,6 +1524,102 @@ void Game::handleInput() {
                     }
                 }
             }
+            else if (state == GameState::ReplayFactory) {
+                // Get current editing string
+                std::string* editStr = nullptr;
+                if (editingPlayerName) editStr = &factoryReplayInfo.playerName;
+                else if (editingTimestamp) editStr = &factoryTimestampStr;
+                else if (editingJudgements) editStr = &factoryJudgementsStr;
+                else if (editingScore) editStr = &factoryScoreStr;
+                else if (editingCombo) editStr = &factoryComboStr;
+                else if (editingBlockHeight) editStr = &blockHeightInput;
+                else if (editingVideoWidth) editStr = &videoWidthInput;
+                else if (editingVideoHeight) editStr = &videoHeightInput;
+                else if (editingVideoFPS) editStr = &videoFPSInput;
+
+                // Handle backspace - delete character before cursor
+                if (e.key.key == SDLK_BACKSPACE) {
+                    if (editStr && cursorPos > 0) {
+                        editStr->erase(cursorPos - 1, 1);
+                        cursorPos--;
+                    }
+                }
+                // Handle Delete key - delete character at cursor
+                else if (e.key.key == SDLK_DELETE) {
+                    if (editStr && cursorPos < (int)editStr->length()) {
+                        editStr->erase(cursorPos, 1);
+                    }
+                }
+                // Handle left arrow - move cursor left
+                else if (e.key.key == SDLK_LEFT) {
+                    if (cursorPos > 0) cursorPos--;
+                }
+                // Handle right arrow - move cursor right
+                else if (e.key.key == SDLK_RIGHT) {
+                    if (editStr && cursorPos < (int)editStr->length()) cursorPos++;
+                }
+                // Handle Home key - move cursor to start
+                else if (e.key.key == SDLK_HOME) {
+                    cursorPos = 0;
+                }
+                // Handle End key - move cursor to end
+                else if (e.key.key == SDLK_END) {
+                    if (editStr) cursorPos = (int)editStr->length();
+                }
+                else if (e.key.key == SDLK_RETURN || e.key.key == SDLK_ESCAPE) {
+                    // Finish editing and save values
+                    if (editingTimestamp) {
+                        // Parse timestamp string (local time) to .NET DateTime.Ticks (UTC)
+                        int year, month, day, hour, min, sec;
+                        int parsed = sscanf(factoryTimestampStr.c_str(), "%d/%d/%d %d:%d:%d",
+                                   &year, &month, &day, &hour, &min, &sec);
+                        std::cout << "Parsed " << parsed << " values: " << year << "/" << month << "/" << day
+                                  << " " << hour << ":" << min << ":" << sec << std::endl;
+                        if (parsed == 6 && year >= 1601 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+                            SYSTEMTIME st = {0};
+                            st.wYear = (WORD)year; st.wMonth = (WORD)month; st.wDay = (WORD)day;
+                            st.wHour = (WORD)hour; st.wMinute = (WORD)min; st.wSecond = (WORD)sec;
+                            FILETIME ftLocal, ftUtc;
+                            if (SystemTimeToFileTime(&st, &ftLocal)) {
+                                LocalFileTimeToFileTime(&ftLocal, &ftUtc);
+                                int64_t fileTimeTicks = ((int64_t)ftUtc.dwHighDateTime << 32) | ftUtc.dwLowDateTime;
+                                factoryReplayInfo.timestamp = fileTimeTicks + 504911232000000000LL;
+                            } else {
+                                std::cout << "SystemTimeToFileTime failed!" << std::endl;
+                            }
+                        }
+                    }
+                    if (editingJudgements) {
+                        // Parse judgements string
+                        int g300, n300, n200, n100, n50, miss;
+                        if (sscanf(factoryJudgementsStr.c_str(), "%d,%d,%d,%d,%d,%d",
+                                   &g300, &n300, &n200, &n100, &n50, &miss) == 6) {
+                            factoryReplayInfo.count300g = g300;
+                            factoryReplayInfo.count300 = n300;
+                            factoryReplayInfo.count200 = n200;
+                            factoryReplayInfo.count100 = n100;
+                            factoryReplayInfo.count50 = n50;
+                            factoryReplayInfo.countMiss = miss;
+                        }
+                    }
+                    if (editingScore) {
+                        try {
+                            factoryReplayInfo.totalScore = std::stoi(factoryScoreStr);
+                        } catch (...) {}
+                    }
+                    if (editingCombo) {
+                        try {
+                            factoryReplayInfo.maxCombo = std::stoi(factoryComboStr);
+                        } catch (...) {}
+                    }
+                    // Clear all editing states
+                    editingPlayerName = false;
+                    editingTimestamp = false;
+                    editingJudgements = false;
+                    editingScore = false;
+                    editingCombo = false;
+                }
+            }
             else if (state == GameState::KeyBinding) {
                 if (e.key.key == SDLK_ESCAPE) {
                     state = GameState::Settings;
@@ -1577,8 +1714,13 @@ void Game::handleInput() {
                                 // AutoPlay forces player name to "Mr.AutoPlay"
                                 std::string exportPlayerName = autoPlay ? "Mr.AutoPlay" : settings.username;
                                 int mods = 0;
-                                if (autoPlay) mods |= 2048;
-                                if (settings.suddenDeathEnabled) mods |= 32;
+                                if (autoPlay) mods |= 2048;              // Auto
+                                if (settings.suddenDeathEnabled) mods |= 32;   // SD
+                                if (settings.halfTimeEnabled) mods |= 256;     // HT
+                                if (settings.doubleTimeEnabled) mods |= 64;    // DT
+                                if (settings.nightcoreEnabled) mods |= 512;    // NC
+                                if (settings.hiddenEnabled) mods |= 8;         // HD
+                                if (settings.fadeInEnabled) mods |= 0x400000;  // FI
                                 ReplayWriter::write(savePath, beatmap.beatmapHash, exportPlayerName, beatmap.keyCount,
                                                    judgementCounts, maxCombo, score, mods, recordedFrames);
                             }
@@ -2065,7 +2207,7 @@ void Game::render() {
             // Render disabled button (no click handling)
             renderer.renderButton("Select Beatmap", btnX, btnY, btnW, btnH, -1, -1, false);
             // Show warning message
-            renderer.renderText("No Available Beatmap in Songs Folder.", btnX - 60, btnY + btnH + 60);
+            renderer.renderText("No Available Beatmap in Songs Folder.", btnX - 120, btnY + btnH + 130);
         }
         if (renderer.renderButton("Select Replay", btnX, btnY + 60, btnW, btnH, mouseX, mouseY, mouseClicked)) {
             std::string replayPath = openReplayDialog();
@@ -2134,6 +2276,13 @@ void Game::render() {
                     renderer.setWindowTitle(title);
                 }
             }
+        }
+        if (renderer.renderButton("Replay Factory", btnX, btnY + 120, btnW, btnH, mouseX, mouseY, mouseClicked)) {
+            // Initialize factory state
+            factoryReplayPath.clear();
+            factoryReplayInfo = ReplayInfo();  // Reset to default (mods = 0)
+            factoryMirrorInput = false;  // Reset mirror checkbox
+            state = GameState::ReplayFactory;
         }
         if (renderer.renderButton("Settings", 20, 20, 100, 35, mouseX, mouseY, mouseClicked)) {
             state = GameState::Settings;
@@ -2353,10 +2502,15 @@ void Game::render() {
                 } else {
                     exportPlayerName = settings.username;
                 }
-                // Determine mods (AutoPlay = 2048, SuddenDeath = 32)
+                // Determine mods
                 int mods = 0;
-                if (autoPlay) mods |= 2048;
-                if (settings.suddenDeathEnabled) mods |= 32;
+                if (autoPlay) mods |= 2048;              // Auto
+                if (settings.suddenDeathEnabled) mods |= 32;   // SD
+                if (settings.halfTimeEnabled) mods |= 256;     // HT
+                if (settings.doubleTimeEnabled) mods |= 64;    // DT
+                if (settings.nightcoreEnabled) mods |= 512;    // NC
+                if (settings.hiddenEnabled) mods |= 8;         // HD
+                if (settings.fadeInEnabled) mods |= 0x400000;  // FI
                 ReplayWriter::write(savePath, beatmap.beatmapHash, exportPlayerName, beatmap.keyCount,
                                    judgementCounts, maxCombo, score, mods, recordedFrames);
             }
@@ -2368,6 +2522,506 @@ void Game::render() {
             if (renderer.renderButton("Export Log", btnX, btnY, btnW, btnH, mouseX, mouseY, mouseClicked)) {
                 exportDebugLog();
             }
+        }
+    }
+    else if (state == GameState::ReplayFactory) {
+        // Title
+        renderer.renderLabel("Replay Factory", 1280/2 - 100, 50);
+
+        // Import | Filename | Export row (centered)
+        float rowY = 100;
+        float btnW = 80, btnH = 35;
+        float fileBoxW = 300;
+        float totalW = btnW + 10 + fileBoxW + 10 + btnW;  // Import + gap + box + gap + Export
+        float startX = (1280 - totalW) / 2;
+
+        // Import button
+        if (renderer.renderButton("Import", startX, rowY, btnW, btnH, mouseX, mouseY, mouseClicked)) {
+            std::string path = openReplayDialog();
+            if (!path.empty()) {
+                if (ReplayParser::parse(path, factoryReplayInfo)) {
+                    factoryReplayPath = path;
+                    // Debug: print first few frames after import
+                    std::cout << "[Import] Loaded " << factoryReplayInfo.frames.size() << " frames" << std::endl;
+                    for (size_t i = 0; i < 5 && i < factoryReplayInfo.frames.size(); i++) {
+                        std::cout << "[Import] Frame " << i << ": x=" << factoryReplayInfo.frames[i].x
+                                  << ", y=" << factoryReplayInfo.frames[i].y << std::endl;
+                    }
+                }
+            }
+        }
+
+        // Filename box
+        float boxX = startX + btnW + 10;
+        SDL_SetRenderDrawColor(renderer.getRenderer(), 40, 40, 40, 255);
+        SDL_FRect boxRect = {boxX, rowY, fileBoxW, btnH};
+        SDL_RenderFillRect(renderer.getRenderer(), &boxRect);
+        SDL_SetRenderDrawColor(renderer.getRenderer(), 100, 100, 100, 255);
+        SDL_RenderRect(renderer.getRenderer(), &boxRect);
+
+        // Render filename (clipped to box)
+        if (!factoryReplayPath.empty()) {
+            std::string filename = factoryReplayPath;
+            size_t pos = filename.find_last_of("\\/");
+            if (pos != std::string::npos) filename = filename.substr(pos + 1);
+            renderer.renderTextClipped(filename.c_str(), boxX + 5, rowY + 8, fileBoxW - 10);
+        }
+
+        // Export button
+        float exportX = boxX + fileBoxW + 10;
+        if (renderer.renderButton("Export", exportX, rowY, btnW, btnH, mouseX, mouseY, mouseClicked)) {
+            if (!factoryReplayPath.empty()) {
+                // Apply mirror if checkbox is checked
+                if (factoryMirrorInput) {
+                    int keyCount = 7;
+                    if (factoryReplayInfo.mods & OsuMods::Key4) keyCount = 4;
+                    else if (factoryReplayInfo.mods & OsuMods::Key5) keyCount = 5;
+                    else if (factoryReplayInfo.mods & OsuMods::Key6) keyCount = 6;
+                    else if (factoryReplayInfo.mods & OsuMods::Key7) keyCount = 7;
+                    else if (factoryReplayInfo.mods & OsuMods::Key8) keyCount = 8;
+                    else if (factoryReplayInfo.mods & OsuMods::Key9) keyCount = 9;
+                    ReplayParser::mirrorKeys(factoryReplayInfo, keyCount);
+                }
+
+                // Add watermark before saving
+                factoryReplayInfo.onlineScoreId = ReplayParser::createWatermark();
+
+                // Save to _edited.osr file (don't modify original)
+                std::string editedPath = factoryReplayPath;
+                size_t dotPos = editedPath.rfind('.');
+                if (dotPos != std::string::npos) {
+                    editedPath.insert(dotPos, "_edited");
+                } else {
+                    editedPath += "_edited";
+                }
+                ReplayParser::save(editedPath, factoryReplayInfo);
+            }
+        }
+
+        // Watermark status display
+        if (!factoryReplayPath.empty() && ReplayParser::hasWatermark(factoryReplayInfo.onlineScoreId)) {
+            int64_t wmTime = ReplayParser::getWatermarkTime(factoryReplayInfo.onlineScoreId);
+            // Convert ms timestamp to readable format
+            time_t seconds = wmTime / 1000;
+            struct tm* tm_info = localtime(&seconds);
+            char timeBuf[64];
+            strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", tm_info);
+            char wmText[128];
+            snprintf(wmText, sizeof(wmText), "Last Modified: %s", timeBuf);
+            renderer.renderText(wmText, exportX + btnW + 10, rowY + 10);
+        }
+
+        // Mods section (left 1/4 of screen)
+        float modsX = 20;
+        float modsY = 170;  // Align with Metadata and Analyze
+        float modsW = 1280 / 4 - 40;
+        renderer.renderLabel("Mods", modsX, modsY);
+
+        // Mod checkboxes
+        struct ModDef { const char* name; int flag; };
+        ModDef mods[] = {
+            {"NoFail", OsuMods::NoFail},
+            {"Easy", OsuMods::Easy},
+            {"TouchDevice", OsuMods::TouchDevice},
+            {"Hidden", OsuMods::Hidden},
+            {"HardRock", OsuMods::HardRock},
+            {"SuddenDeath", OsuMods::SuddenDeath},
+            {"DoubleTime", OsuMods::DoubleTime},
+            {"Relax", OsuMods::Relax},
+            {"HalfTime", OsuMods::HalfTime},
+            {"Nightcore", OsuMods::Nightcore},
+            {"Flashlight", OsuMods::Flashlight},
+            {"Autoplay", OsuMods::Autoplay},
+            {"SpunOut", OsuMods::SpunOut},
+            {"Autopilot", OsuMods::Relax2},
+            {"Perfect", OsuMods::Perfect},
+            {"Key4", OsuMods::Key4},
+            {"Key5", OsuMods::Key5},
+            {"Key6", OsuMods::Key6},
+            {"Key7", OsuMods::Key7},
+            {"Key8", OsuMods::Key8},
+            {"FadeIn", OsuMods::FadeIn},
+            {"Random", OsuMods::Random},
+            {"Cinema", OsuMods::Cinema},
+            {"Target", OsuMods::Target},
+            {"Key9", OsuMods::Key9},
+            {"KeyCoop", OsuMods::KeyCoop},
+            {"Key1", OsuMods::Key1},
+            {"Key3", OsuMods::Key3},
+            {"Key2", OsuMods::Key2},
+            {"ScoreV2", OsuMods::ScoreV2},
+            {"Mirror", OsuMods::Mirror},
+        };
+
+        float checkY = modsY + 30;
+        int modCount = sizeof(mods) / sizeof(mods[0]);
+        int halfCount = (modCount + 1) / 2;
+        float col2X = modsX + 170;  // Second column X position
+
+        for (int i = 0; i < modCount; i++) {
+            const auto& mod = mods[i];
+            float x = (i < halfCount) ? modsX : col2X;
+            float y = checkY + (i % halfCount) * 22;
+
+            bool checked = (factoryReplayInfo.mods & mod.flag) != 0;
+            if (renderer.renderCheckbox(mod.name, checked, x, y, mouseX, mouseY, mouseClicked)) {
+                if (checked) {
+                    factoryReplayInfo.mods &= ~mod.flag;
+                } else {
+                    factoryReplayInfo.mods |= mod.flag;
+                }
+            }
+        }
+
+        // Metadata section (2nd quarter of screen)
+        float metaX = 1280 / 4 + 20;
+        float metaY = 170;  // Moved down 20px
+        float metaW = 1280 / 4 - 40;  // Only 1/4 width
+        renderer.renderLabel("Metadata", metaX, metaY);
+
+        // Handle text input enable/disable
+        bool anyEditing = editingPlayerName || editingTimestamp || editingJudgements || editingScore || editingCombo || editingBlockHeight || editingVideoWidth || editingVideoHeight || editingVideoFPS;
+        static bool wasAnyEditing = false;
+        if (anyEditing && !wasAnyEditing) {
+            SDL_StartTextInput(renderer.getWindow());
+        } else if (!anyEditing && wasAnyEditing) {
+            SDL_StopTextInput(renderer.getWindow());
+        }
+        wasAnyEditing = anyEditing;
+
+        float inputY = metaY + 30;
+        float inputW = metaW - 10;
+        float inputSpacing = 70;  // More spacing between fields
+
+        // Player Name
+        renderer.renderLabel("Player Name", metaX, inputY);
+        renderer.renderTextInput(nullptr, factoryReplayInfo.playerName, metaX, inputY + 40, inputW, mouseX, mouseY, mouseClicked, editingPlayerName, cursorPos);
+        inputY += inputSpacing;
+
+        // Timestamp (convert to string for editing)
+        if (!editingTimestamp && !factoryReplayPath.empty()) {
+            // osu! timestamp is .NET DateTime.Ticks (from 0001-01-01)
+            // Convert to FILETIME (from 1601-01-01) by subtracting 1600 years
+            // Offset: 504911232000000000 ticks (1600 years)
+            int64_t fileTimeTicks = factoryReplayInfo.timestamp - 504911232000000000LL;
+            if (fileTimeTicks > 0) {
+                FILETIME ftUtc, ftLocal;
+                ftUtc.dwLowDateTime = (DWORD)(fileTimeTicks & 0xFFFFFFFF);
+                ftUtc.dwHighDateTime = (DWORD)(fileTimeTicks >> 32);
+                // Convert UTC to local time
+                FileTimeToLocalFileTime(&ftUtc, &ftLocal);
+                SYSTEMTIME st;
+                if (FileTimeToSystemTime(&ftLocal, &st)) {
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "%04d/%02d/%02d %02d:%02d:%02d",
+                             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+                    factoryTimestampStr = buf;
+                } else {
+                    factoryTimestampStr = "Invalid timestamp";
+                }
+            } else {
+                factoryTimestampStr = "Invalid timestamp";
+            }
+        }
+        renderer.renderLabel("Timestamp", metaX, inputY);
+        renderer.renderText("(yyyy/mm/dd hh:mm:ss)", metaX, inputY + 18);
+        renderer.renderTextInput(nullptr, factoryTimestampStr, metaX, inputY + 55, inputW, mouseX, mouseY, mouseClicked, editingTimestamp, cursorPos);
+        inputY += inputSpacing + 15;
+
+        // Judgements (300g,300,200,100,50,miss)
+        if (!editingJudgements && !factoryReplayPath.empty()) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "%d,%d,%d,%d,%d,%d",
+                     factoryReplayInfo.count300g, factoryReplayInfo.count300,
+                     factoryReplayInfo.count200, factoryReplayInfo.count100,
+                     factoryReplayInfo.count50, factoryReplayInfo.countMiss);
+            factoryJudgementsStr = buf;
+        }
+        renderer.renderLabel("Judgements", metaX, inputY);
+        renderer.renderText("(300g,300,200,100,50,miss)", metaX, inputY + 18);
+        renderer.renderTextInput(nullptr, factoryJudgementsStr, metaX, inputY + 55, inputW, mouseX, mouseY, mouseClicked, editingJudgements, cursorPos);
+        inputY += inputSpacing + 15;
+
+        // Score
+        if (!editingScore && !factoryReplayPath.empty()) {
+            factoryScoreStr = std::to_string(factoryReplayInfo.totalScore);
+        }
+        renderer.renderLabel("Score", metaX, inputY);
+        renderer.renderTextInput(nullptr, factoryScoreStr, metaX, inputY + 40, inputW, mouseX, mouseY, mouseClicked, editingScore, cursorPos);
+        inputY += inputSpacing;
+
+        // Combo
+        if (!editingCombo && !factoryReplayPath.empty()) {
+            factoryComboStr = std::to_string(factoryReplayInfo.maxCombo);
+        }
+        renderer.renderLabel("Max Combo", metaX, inputY);
+        renderer.renderTextInput(nullptr, factoryComboStr, metaX, inputY + 40, inputW, mouseX, mouseY, mouseClicked, editingCombo, cursorPos);
+        inputY += inputSpacing;
+
+        // Mirror Input checkbox
+        if (renderer.renderCheckbox("Mirror Input", factoryMirrorInput, metaX, inputY + 20, mouseX, mouseY, mouseClicked)) {
+            factoryMirrorInput = !factoryMirrorInput;
+        }
+
+        // Analyze section (3rd quarter of screen)
+        float analyzeX = 1280 / 2 + 20;
+        float analyzeY = 170;
+        renderer.renderLabel("Analyze", analyzeX, analyzeY);
+
+        float analyzeBtnY = analyzeY + 30;
+        float analyzeBtnW = 180, analyzeBtnH = 35;
+
+        // Block clicks when analysis window is open
+        bool analysisBlockClick = showAnalysisWindow;
+
+        // Press Distribution button
+        if (!analysisBlockClick && renderer.renderButton("Press Distribution", analyzeX, analyzeBtnY, analyzeBtnW, analyzeBtnH, mouseX, mouseY, mouseClicked)) {
+            if (!factoryReplayPath.empty()) {
+                analysisResult = ReplayAnalyzer::analyze(factoryReplayInfo);
+                analysisWindowType = 0;
+                showAnalysisWindow = true;
+            }
+        }
+
+        // Realtime Press button
+        if (!analysisBlockClick && renderer.renderButton("Realtime Press", analyzeX, analyzeBtnY + 45, analyzeBtnW, analyzeBtnH, mouseX, mouseY, mouseClicked)) {
+            if (!factoryReplayPath.empty()) {
+                analysisResult = ReplayAnalyzer::analyze(factoryReplayInfo);
+                analysisWindowType = 1;
+                showAnalysisWindow = true;
+            }
+        }
+
+        // Repair section
+        float repairY = analyzeBtnY + 100;
+        renderer.renderLabel("Repair", analyzeX, repairY);
+
+        // Fix Beatmap Hash button
+        if (!analysisBlockClick && renderer.renderButton("Fix Beatmap Hash", analyzeX, repairY + 30, analyzeBtnW, analyzeBtnH, mouseX, mouseY, mouseClicked)) {
+            if (!factoryReplayPath.empty()) {
+                // Open file dialog to select correct beatmap
+                std::string beatmapPath = openFileDialog();
+                if (!beatmapPath.empty()) {
+                    // Calculate new hash
+                    std::string newHash = OsuParser::calculateMD5(beatmapPath);
+                    if (!newHash.empty()) {
+                        // Update replay info
+                        factoryReplayInfo.beatmapHash = newHash;
+                    }
+                }
+            }
+        }
+
+        // Visualization section
+        float vizY = repairY + 80;
+        renderer.renderLabel("Visualization", analyzeX, vizY);
+
+        // Generate Video button
+        bool videoRunning = videoGenerator.isRunning();
+        if (!analysisBlockClick && !videoRunning && renderer.renderButton("Generate Video", analyzeX, vizY + 30, analyzeBtnW, analyzeBtnH, mouseX, mouseY, mouseClicked)) {
+            if (!factoryReplayPath.empty()) {
+                // Find beatmap by hash
+                std::string beatmapPath;
+                std::string audioPath;
+                for (const auto& song : songList) {
+                    for (const auto& diff : song.difficulties) {
+                        if (diff.hash == factoryReplayInfo.beatmapHash) {
+                            beatmapPath = diff.path;
+                            audioPath = song.audioPath;
+                            break;
+                        }
+                    }
+                    if (!beatmapPath.empty()) break;
+                }
+
+                // If not found, ask user to select
+                if (beatmapPath.empty()) {
+                    beatmapPath = openFileDialog();
+                }
+
+                if (!beatmapPath.empty()) {
+                    // Parse beatmap
+                    BeatmapInfo videoBeatmap;
+                    if (OsuParser::parse(beatmapPath, videoBeatmap)) {
+                        // Get audio path if not found
+                        if (audioPath.empty() && !videoBeatmap.audioFilename.empty()) {
+                            size_t lastSlash = beatmapPath.find_last_of("/\\");
+                            if (lastSlash != std::string::npos) {
+                                audioPath = beatmapPath.substr(0, lastSlash + 1) + videoBeatmap.audioFilename;
+                            }
+                        }
+
+                        // Configure video
+                        VideoConfig config;
+                        config.audioPath = audioPath;
+                        config.includeAudio = !audioPath.empty();
+
+                        // Parse video settings from input
+                        try { config.width = std::max(100, std::stoi(videoWidthInput)); } catch (...) { config.width = 540; }
+                        try { config.height = std::max(100, std::stoi(videoHeightInput)); } catch (...) { config.height = 960; }
+                        try { config.fps = std::max(1, std::min(120, std::stoi(videoFPSInput))); } catch (...) { config.fps = 60; }
+                        try { config.blockHeight = std::max(10, std::stoi(blockHeightInput)); } catch (...) { config.blockHeight = 40; }
+                        config.showHolding = videoShowHolding;
+
+                        // Check replay mods for speed modifiers
+                        if (factoryReplayInfo.mods & (OsuMods::DoubleTime | OsuMods::Nightcore)) {
+                            config.clockRate = 1.5;
+                            config.isNightcore = (factoryReplayInfo.mods & OsuMods::Nightcore) != 0;
+                        } else if (factoryReplayInfo.mods & OsuMods::HalfTime) {
+                            config.clockRate = 0.75;
+                            config.isNightcore = false;
+                        } else {
+                            config.clockRate = 1.0;
+                            config.isNightcore = false;
+                        }
+
+                        // Generate output path
+                        size_t lastSlash = factoryReplayPath.find_last_of("/\\");
+                        std::string replayName = (lastSlash != std::string::npos) ?
+                            factoryReplayPath.substr(lastSlash + 1) : factoryReplayPath;
+                        size_t dotPos = replayName.find_last_of('.');
+                        if (dotPos != std::string::npos) {
+                            replayName = replayName.substr(0, dotPos);
+                        }
+                        config.outputPath = "Exports/" + replayName + ".mp4";
+
+                        // Create output directory
+                        std::filesystem::create_directories("Exports");
+
+                        // Start generation
+                        videoGenerator.startGeneration(factoryReplayInfo, videoBeatmap, settings, config, "Data/Tmp");
+                    }
+                }
+            }
+        }
+
+        // Block Height input (below Generate Video button)
+        float blockHeightY = vizY + 70;
+        renderer.renderLabel("Block Height:", analyzeX, blockHeightY);
+        renderer.renderTextInput(nullptr, blockHeightInput, analyzeX + 120, blockHeightY - 5, 50, mouseX, mouseY, mouseClicked, editingBlockHeight, cursorPos);
+
+        // Width input
+        float widthY = blockHeightY + 35;
+        renderer.renderLabel("Width:", analyzeX, widthY);
+        renderer.renderTextInput(nullptr, videoWidthInput, analyzeX + 120, widthY - 5, 50, mouseX, mouseY, mouseClicked, editingVideoWidth, cursorPos);
+
+        // Height input
+        float heightY = widthY + 35;
+        renderer.renderLabel("Height:", analyzeX, heightY);
+        renderer.renderTextInput(nullptr, videoHeightInput, analyzeX + 120, heightY - 5, 50, mouseX, mouseY, mouseClicked, editingVideoHeight, cursorPos);
+
+        // FPS input
+        float fpsY = heightY + 35;
+        renderer.renderLabel("FPS:", analyzeX, fpsY);
+        renderer.renderTextInput(nullptr, videoFPSInput, analyzeX + 120, fpsY - 5, 50, mouseX, mouseY, mouseClicked, editingVideoFPS, cursorPos);
+
+        // Show Holding checkbox
+        float showHoldingY = fpsY + 35;
+        if (renderer.renderCheckbox("Show Holding", videoShowHolding, analyzeX, showHoldingY, mouseX, mouseY, mouseClicked)) {
+            videoShowHolding = !videoShowHolding;
+        }
+
+        // Video generation progress bar
+        if (videoGenerator.isRunning() || videoGenerator.getState() == VideoGenState::Completed ||
+            videoGenerator.getState() == VideoGenState::Failed) {
+            float barX = 100;
+            float barY = 630;
+            float barW = 1080;
+            float barH = 25;
+
+            // Background
+            SDL_SetRenderDrawColor(renderer.getRenderer(), 40, 40, 40, 255);
+            SDL_FRect bgRect = {barX, barY, barW, barH};
+            SDL_RenderFillRect(renderer.getRenderer(), &bgRect);
+
+            // Progress fill
+            float progress = videoGenerator.getProgress();
+            VideoGenState vstate = videoGenerator.getState();
+            if (vstate == VideoGenState::Completed) {
+                SDL_SetRenderDrawColor(renderer.getRenderer(), 50, 200, 50, 255);
+            } else if (vstate == VideoGenState::Failed) {
+                SDL_SetRenderDrawColor(renderer.getRenderer(), 200, 50, 50, 255);
+            } else {
+                SDL_SetRenderDrawColor(renderer.getRenderer(), 100, 150, 255, 255);
+            }
+            SDL_FRect fillRect = {barX, barY, barW * progress, barH};
+            SDL_RenderFillRect(renderer.getRenderer(), &fillRect);
+
+            // Border
+            SDL_SetRenderDrawColor(renderer.getRenderer(), 100, 100, 100, 255);
+            SDL_RenderRect(renderer.getRenderer(), &bgRect);
+
+            // Status text (with line wrapping)
+            std::string statusText = videoGenerator.getStatusText();
+            char percentText[32];
+            snprintf(percentText, sizeof(percentText), " (%.0f%%)", progress * 100);
+            statusText += percentText;
+
+            // Wrap text if too long (max ~80 chars per line)
+            const int maxCharsPerLine = 80;
+            float textY = barY + 4;
+            if (statusText.length() > maxCharsPerLine) {
+                std::string line1 = statusText.substr(0, maxCharsPerLine);
+                std::string line2 = statusText.substr(maxCharsPerLine);
+                renderer.renderText(line1.c_str(), barX + 10, textY);
+                renderer.renderText(line2.c_str(), barX + 10, textY + 20);
+            } else {
+                renderer.renderText(statusText.c_str(), barX + 10, textY);
+            }
+        }
+
+        // Analysis window
+        if (showAnalysisWindow) {
+            // Window dimensions
+            float winW = 800, winH = 500;
+            float winX = (1280 - winW) / 2;
+            float winY = (720 - winH) / 2;
+
+            // Draw window background
+            SDL_SetRenderDrawColor(renderer.getRenderer(), 30, 30, 30, 240);
+            SDL_FRect winRect = {winX, winY, winW, winH};
+            SDL_RenderFillRect(renderer.getRenderer(), &winRect);
+            SDL_SetRenderDrawColor(renderer.getRenderer(), 100, 100, 100, 255);
+            SDL_RenderRect(renderer.getRenderer(), &winRect);
+
+            // Window title
+            const char* title = (analysisWindowType == 0) ? "Press Time Distribution" : "Realtime Press Time";
+            renderer.renderLabel(title, winX + 10, winY + 10);
+
+            // Draw chart area
+            float chartX = winX + 60;
+            float chartY = winY + 50;
+            float chartW = winW - 100;
+            float chartH = winH - 120;
+
+            // Chart background
+            SDL_SetRenderDrawColor(renderer.getRenderer(), 20, 20, 20, 255);
+            SDL_FRect chartRect = {chartX, chartY, chartW, chartH};
+            SDL_RenderFillRect(renderer.getRenderer(), &chartRect);
+
+            // Draw chart content
+            renderer.renderAnalysisChart(analysisResult, analysisWindowType, chartX, chartY, chartW, chartH);
+
+            // Save button (top-right corner)
+            float saveBtnX = winX + winW - 180;
+            float saveBtnY = winY + 8;
+            if (renderer.renderButton("Save", saveBtnX, saveBtnY, 80, 30, mouseX, mouseY, mouseClicked)) {
+                std::string savePath = saveImageDialog();
+                if (!savePath.empty()) {
+                    renderer.saveAnalysisChart(analysisResult, analysisWindowType, savePath, 800, 400);
+                    showAnalysisWindow = false;
+                }
+            }
+
+            // Close button (top-right corner)
+            if (renderer.renderButton("Close", saveBtnX + 90, saveBtnY, 80, 30, mouseX, mouseY, mouseClicked)) {
+                showAnalysisWindow = false;
+            }
+        }
+
+        // Back button
+        if (renderer.renderButton("Back", 20, 20, 100, 35, mouseX, mouseY, mouseClicked)) {
+            state = GameState::Menu;
         }
     }
     else if (state == GameState::Settings) {
@@ -2571,7 +3225,7 @@ void Game::render() {
 
             // Text input for scroll speed (to the right of label, same line)
             bool wasEditing = editingScrollSpeed;
-            renderer.renderTextInput(nullptr, scrollSpeedInput, contentX + 210, row4Y - 5, 50, mouseX, mouseY, mouseClicked, editingScrollSpeed);
+            renderer.renderTextInput(nullptr, scrollSpeedInput, contentX + 210, row4Y - 5, 50, mouseX, mouseY, mouseClicked, editingScrollSpeed, settingsCursorPos);
 
             // Handle text input start/stop
             if (editingScrollSpeed && !wasEditing) {
@@ -2779,7 +3433,7 @@ void Game::render() {
             // Username input
             float usernameY = scrolledY + 120;
             renderer.renderTextInput("Username", settings.username, contentX, usernameY, 200,
-                                     mouseX, mouseY, mouseClicked, editingUsername);
+                                     mouseX, mouseY, mouseClicked, editingUsername, settingsCursorPos);
 
             // Force override checkbox (to the right of username input)
             if (renderer.renderCheckbox("Force Override When Exporting", settings.forceOverrideUsername,

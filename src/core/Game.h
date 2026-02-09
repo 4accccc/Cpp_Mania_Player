@@ -9,12 +9,14 @@
 #include "AudioManager.h"
 #include "Settings.h"
 #include "ReplayParser.h"
+#include "ReplayAnalyzer.h"
 #include "SkinManager.h"
 #include "HPManager.h"
 #include "KeySoundManager.h"
 #include "Storyboard.h"
 #include "PPCalculator.h"
 #include "DJMAXOLBgaParser.h"
+#include "VideoGenerator.h"
 
 // Debug log entry for replay analysis
 struct DebugLogEntry {
@@ -32,7 +34,8 @@ enum class GameState {
     Playing,
     Paused,
     Dead,
-    Result
+    Result,
+    ReplayFactory
 };
 
 // Beatmap source type
@@ -88,6 +91,7 @@ private:
     std::string openFileDialog();
     std::string openReplayDialog();
     std::string saveReplayDialog();
+    std::string saveImageDialog();
     std::string openSkinFolderDialog();
     void handleInput();
     void update();
@@ -229,6 +233,7 @@ private:
     bool editingUsername;  // true when editing username text input
     bool editingScrollSpeed;  // true when editing scroll speed input
     std::string scrollSpeedInput;  // temporary input string for scroll speed
+    int settingsCursorPos = 0;  // Cursor position for settings text input
 
     // Song select
     std::vector<SongEntry> songList;
@@ -254,6 +259,41 @@ private:
     int64_t previewFadeStart;
     int previewFadeDuration;
     int previewTargetIndex;  // Song to play after fade out
+
+    // Replay Factory
+    std::string factoryReplayPath;  // Loaded replay file path
+    ReplayInfo factoryReplayInfo;   // Loaded replay data
+    bool factoryMirrorInput = false; // Mirror input checkbox state
+
+    // Replay Factory editing states
+    bool editingPlayerName = false;
+    bool editingTimestamp = false;
+    bool editingJudgements = false;
+    bool editingScore = false;
+    bool editingCombo = false;
+    int cursorPos = 0;  // Cursor position for text input
+    std::string factoryTimestampStr;
+    std::string factoryJudgementsStr;
+    std::string factoryScoreStr;
+    std::string factoryComboStr;
+
+    // Replay Analysis
+    bool showAnalysisWindow = false;
+    int analysisWindowType = 0;  // 0 = press distribution, 1 = realtime press
+    AnalysisResult analysisResult;
+    SDL_Texture* analysisTexture = nullptr;
+
+    // Video Generation
+    VideoGenerator videoGenerator;
+    bool editingBlockHeight = false;
+    std::string blockHeightInput = "40";
+    bool editingVideoWidth = false;
+    std::string videoWidthInput = "540";
+    bool editingVideoHeight = false;
+    std::string videoHeightInput = "960";
+    bool editingVideoFPS = false;
+    std::string videoFPSInput = "60";
+    bool videoShowHolding = false;
 
     // Debug logging
     std::vector<DebugLogEntry> debugLog;
