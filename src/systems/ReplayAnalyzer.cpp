@@ -16,15 +16,7 @@ std::vector<int> ReplayAnalyzer::getKeyStates(int keyMask, int keyCount) {
 }
 
 int ReplayAnalyzer::detectKeyCount(const ReplayInfo& replay) {
-    // First, try to get key count from mods (more reliable)
-    if (replay.mods & OsuMods::Key4) return 4;
-    if (replay.mods & OsuMods::Key5) return 5;
-    if (replay.mods & OsuMods::Key6) return 6;
-    if (replay.mods & OsuMods::Key7) return 7;
-    if (replay.mods & OsuMods::Key8) return 8;
-    if (replay.mods & OsuMods::Key9) return 9;
-
-    // Fallback: detect the maximum key used in replay
+    // First detect from replay data by finding highest bit used
     int maxKey = 0;
     for (const auto& frame : replay.frames) {
         int keyMask = frame.keyState;
@@ -38,10 +30,17 @@ int ReplayAnalyzer::detectKeyCount(const ReplayInfo& replay) {
         }
     }
 
-    // Limit to reasonable range (4-10 keys)
-    if (maxKey > 0 && maxKey <= 10) {
+    if (maxKey >= 4 && maxKey <= 10) {
         return maxKey;
     }
+
+    // Fallback: check mods for explicit key count
+    if (replay.mods & OsuMods::Key4) return 4;
+    if (replay.mods & OsuMods::Key5) return 5;
+    if (replay.mods & OsuMods::Key6) return 6;
+    if (replay.mods & OsuMods::Key7) return 7;
+    if (replay.mods & OsuMods::Key8) return 8;
+    if (replay.mods & OsuMods::Key9) return 9;
 
     return 7;  // Default 7K
 }

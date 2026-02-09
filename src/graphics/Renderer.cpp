@@ -12,7 +12,7 @@ Renderer::Renderer() : window(nullptr), renderer(nullptr), font(nullptr),
     updateLaneLayout();
     // Initialize lightingN hit times
     for (int i = 0; i < 18; i++) {
-        lightingNHitTime[i] = -1000;  // Far in the past
+        lightingNHitTime[i] = INT64_MIN;  // Far in the past (avoid triggering during prepare time)
     }
 }
 
@@ -53,6 +53,10 @@ void Renderer::resetHitErrorIndicator() {
     hitErrorAnimStartPos = 0.0f;
     hitErrorAnimStartTime = 0;
     lastHitErrorCount = 0;
+    // Reset lightingN hit times to prevent ghost effects
+    for (int i = 0; i < 18; i++) {
+        lightingNHitTime[i] = INT64_MIN;
+    }
 }
 
 void Renderer::updateLaneLayout() {
@@ -223,7 +227,8 @@ double Renderer::getSVMultiplier(int64_t time, const std::vector<TimingPoint>& t
         const auto& tp = timingPoints[i];
         if (!tp.uninherited && tp.beatLength < 0) {
             double sv = -tp.beatLength;
-            sv = std::max(10.0, std::min(10000.0, sv));
+            // Allow very small SV (0.001) for Malody scroll=0 effect
+            sv = std::max(0.1, std::min(10000.0, sv));
             return sv / 100.0;
         }
     }
@@ -321,7 +326,8 @@ int Renderer::getNoteY(int64_t noteTime, int64_t currentTime, int scrollSpeed, d
             currentBaseBL = std::clamp(tp.beatLength, 1.0, 10000000.0);
         } else if (!tp.uninherited && tp.beatLength < 0) {
             double sv = -tp.beatLength;
-            sv = std::max(10.0, std::min(10000.0, sv));
+            // Allow very small SV (0.001) for Malody scroll=0 effect
+            sv = std::max(0.1, std::min(10000.0, sv));
             currentSV = sv / 100.0;
         }
     }
@@ -1965,7 +1971,7 @@ void Renderer::renderMenu() {
         SDL_DestroySurface(s);
     }
 
-    const char* version = "Version 0.0.4b";
+    const char* version = "Version 0.0.4";
     s = TTF_RenderText_Blended(font, version, strlen(version), white);
     if (s) {
         SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);

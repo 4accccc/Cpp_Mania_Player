@@ -32,6 +32,8 @@ public:
     void renderHitLighting(const bool* laneKeyDown, int keyCount);
     void renderNoteLighting(const bool* laneHoldActive, int keyCount, int64_t currentTime);  // LightingN/LightingL effects
     void triggerLightingN(int lane, int64_t time);  // Trigger LightingN animation on note hit
+    int getJudgeLineY() const { return judgeLineY; }  // Get judge line Y position
+    int getNoteY(int64_t noteTime, int64_t currentTime, int scrollSpeed, double baseBPM, bool bpmScaleMode, const std::vector<TimingPoint>& timingPoints, bool ignoreSV = false, double clockRate = 1.0) const;
     void renderLaneHighlights(const bool* laneKeyDown, int keyCount, bool hiddenMod, bool fadeInMod, int combo);
     void renderNotes(std::vector<Note>& notes, int64_t currentTime, int scrollSpeed, double baseBPM, bool bpmScaleMode, const std::vector<TimingPoint>& timingPoints, const NoteColor* colors, bool hiddenMod = false, bool fadeInMod = false, int combo = 0, bool ignoreSV = false, double clockRate = 1.0);
     void renderJudgeLine();
@@ -128,7 +130,6 @@ private:
     float getLaneX(int lane) const;
     float getLaneWidth(int lane) const;
     float getColumnSpacing(int lane) const;
-    int getNoteY(int64_t noteTime, int64_t currentTime, int scrollSpeed, double baseBPM, bool bpmScaleMode, const std::vector<TimingPoint>& timingPoints, bool ignoreSV = false, double clockRate = 1.0) const;
     int getHoldHeadY(const Note& note, int naturalY, int64_t currentTime, int scrollSpeed) const;
     double getSVMultiplier(int64_t time, const std::vector<TimingPoint>& timingPoints) const;
     double getBaseBeatLength(int64_t time, const std::vector<TimingPoint>& timingPoints) const;

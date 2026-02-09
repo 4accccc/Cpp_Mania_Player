@@ -6,6 +6,7 @@
 - Play keysounds
 - Support osu's storyboard
 - Capable with osu's skin
+- Can Read / Write / Edit osu! replay files [*.osr]
 
 ## Support Chart formats
 - Be-Music Script [*.bms]
@@ -15,6 +16,7 @@
 - O2Jam [*.ojn]
 
 ### Formats planned to support
+- Malody
 - EZ2DJ/EZ2ON
 - Stepmania
 - MUSYNX/MUSYNC
@@ -117,6 +119,20 @@ This project uses the following third-party libraries:
 - 新增 Replay 元信息修改
 - 新增 Replay Analyze 功能 (实现了 Press Distribution 和 Realtime Press 图表显示，基于 [Transcendence](https://github.com/adgjl7777777) 的 [VSRG_Total_Analyzer](https://github.com/adgjl7777777/VSRG_Total_Analyzer) )
 - 新增 Replay 可视化视频输出 (基于 [kuit](https://github.com/Keytoyze) 的 [Mania-Replay-Master](https://github.com/Keytoyze/Mania-Replay-Master) )
+
+
+
+### Mania Player v0.0.4
+
+- 修复了长条断掉时 tick 也仍然在计算的问题
+- 修复了长条即使不按也会出现按住的特效的问题
+- 修复了设置中 Username 无法输入的问题
+- 修复了 Replay Factory 读取 KeyCount 异常的问题
+- 修复了启用 Mirror Input 多次进行回放导出后回放出现异常的问题
+- 修复了每次打开程序后第一次游戏开头会出现幽灵按键的问题
+- 修复了准备时间时暂停游戏后判定出现异常的问题
+- 新增 Malody 谱面读取
+- 新增 O2Jam 判定模式 (overlap-based)
 
 
 

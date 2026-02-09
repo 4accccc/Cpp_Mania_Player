@@ -211,9 +211,8 @@ bool OjnParser::parse(const std::string& filepath, BeatmapInfo& info,
     const char* diffNames[] = {"Easy", "Normal", "Hard"};
     info.version = diffNames[diffIdx];
 
-    // Set OD based on level
-    info.od = static_cast<float>(header.level[diffIdx]) / 10.0f;
-    if (info.od > 10.0f) info.od = 10.0f;
+    // Default OD0 for O2Jam
+    info.od = 0.0f;
 
     info.notes.clear();
     info.timingPoints.clear();

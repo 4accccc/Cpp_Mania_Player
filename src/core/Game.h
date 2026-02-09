@@ -17,6 +17,7 @@
 #include "PPCalculator.h"
 #include "DJMAXOLBgaParser.h"
 #include "VideoGenerator.h"
+#include "JudgementSystem.h"
 
 // Debug log entry for replay analysis
 struct DebugLogEntry {
@@ -43,7 +44,8 @@ enum class BeatmapSource {
     Osu,
     DJMax,
     O2Jam,
-    BMS
+    BMS,
+    Malody
 };
 
 // Difficulty info for song select
@@ -98,7 +100,7 @@ private:
     void render();
     Judgement checkJudgement(int lane, int64_t atTime = INT64_MIN);
     void onKeyRelease(int lane, int64_t atTime = INT64_MIN);
-    Judgement getJudgement(int64_t diff);
+    Judgement getJudgement(int64_t diff, int64_t noteTime, int64_t currentTime);
     void processJudgement(Judgement j, int lane);
     double calculateAccuracy();
     void updateReplay();
@@ -183,12 +185,7 @@ private:
     double perfDraw;    // Draw time (ms)
     double perfAudio;   // Audio time (ms)
 
-    double judgeMarvelous;
-    double judgePerfect;
-    double judgeGreat;
-    double judgeGood;
-    double judgeBad;
-    double judgeMiss;  // miss window (188 - 3 * OD)
+    JudgementSystem judgementSystem;
 
     int mouseX, mouseY;
     bool mouseClicked;
@@ -263,6 +260,7 @@ private:
     // Replay Factory
     std::string factoryReplayPath;  // Loaded replay file path
     ReplayInfo factoryReplayInfo;   // Loaded replay data
+    ReplayInfo factoryReplayInfoMirrored;  // Mirrored replay data
     bool factoryMirrorInput = false; // Mirror input checkbox state
 
     // Replay Factory editing states

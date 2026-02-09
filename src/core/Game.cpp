@@ -7,6 +7,7 @@
 #include "OjnParser.h"
 #include "OjmParser.h"
 #include "BMSParser.h"
+#include "MalodyParser.h"
 #include "StarRating.h"
 #include "SongIndex.h"
 #include "OsuMods.h"
@@ -37,6 +38,43 @@ static SampleSet getTimingPointSampleSet(const std::vector<TimingPoint>& timingP
         }
     }
     return result;
+}
+
+// Helper function to get BPM at a given time (for O2Jam judgement)
+static double getBPMAtTime(const std::vector<TimingPoint>& timingPoints, int64_t time, double defaultBPM) {
+    double bpm = defaultBPM;
+    for (const auto& tp : timingPoints) {
+        if (tp.time <= time && tp.uninherited && tp.beatLength > 0) {
+            bpm = 60000.0 / tp.beatLength;
+        } else if (tp.time > time) {
+            break;
+        }
+    }
+    return bpm;
+}
+
+// Helper function to calculate overlap percentage between note and virtual judge line
+// noteY: top of actual note, judgeLineY: center of virtual judge line (real judge line position)
+// Both virtual note and virtual judge line are scaled by Hi-Speed, centered on their actual positions
+static double calcOverlapPercent(int noteY, int judgeLineY, int noteHeight, double speedMultiplier = 1.0) {
+    // Virtual note height scales with speed, centered on actual note
+    int virtualNoteHeight = static_cast<int>(noteHeight * speedMultiplier);
+    int actualNoteCenter = noteY + noteHeight / 2;
+    int noteTop = actualNoteCenter - virtualNoteHeight / 2;
+    int noteBottom = actualNoteCenter + virtualNoteHeight / 2;
+
+    // Virtual judge line height scales with speed, centered on real judge line
+    int judgeHeight = static_cast<int>(noteHeight * speedMultiplier);
+    int judgeTop = judgeLineY - judgeHeight / 2;
+    int judgeBottom = judgeLineY + judgeHeight / 2;
+
+    // Calculate overlap
+    int overlapTop = std::max(noteTop, judgeTop);
+    int overlapBottom = std::min(noteBottom, judgeBottom);
+    int overlap = std::max(0, overlapBottom - overlapTop);
+
+    // Return overlap as percentage of virtual note height
+    return (double)overlap / virtualNoteHeight;
 }
 
 // Helper function to build HitSoundInfo from Note
@@ -498,6 +536,10 @@ void Game::resetGame() {
     beatmap.storyboardSamples.clear();
     beatmap.audioFilename.clear();  // Clear audio filename
     for (int i = 0; i < 6; i++) judgementCounts[i] = 0;
+    // Reset lane key states to prevent ghost key presses at game start
+    for (int i = 0; i < 10; i++) {
+        laneKeyDown[i] = false;
+    }
     combo = 0;
     maxCombo = 0;
     score = 0;
@@ -562,12 +604,13 @@ bool Game::loadBeatmap(const std::string& path) {
     clockRate = 1.0;
     scoreMultiplier = 1.0;
     // Apply DT/NC/HT only if not in replay mode (replay mode uses mods from replay file)
+    // Priority: DT > HT (same as osu!)
     if (!replayMode) {
-        if (settings.halfTimeEnabled) {
+        if (settings.doubleTimeEnabled || settings.nightcoreEnabled) {
+            clockRate = 1.5;
+        } else if (settings.halfTimeEnabled) {
             clockRate = 0.75;
             scoreMultiplier = 0.5;
-        } else if (settings.doubleTimeEnabled || settings.nightcoreEnabled) {
-            clockRate = 1.5;
         }
         audio.setPlaybackRate(static_cast<float>(clockRate));
         audio.setChangePitch(settings.nightcoreEnabled);
@@ -595,6 +638,7 @@ bool Game::loadBeatmap(const std::string& path) {
     bool isPT = PTParser::isPTFile(actualPath);
     bool isOjn = OjnParser::isOjnFile(actualPath);
     bool isBMS = BMSParser::isBMSFile(actualPath);
+    bool isMalody = actualPath.size() > 3 && actualPath.substr(actualPath.size() - 3) == ".mc";
     std::string ptAudioDir;  // For PT files with PAK extraction
 
     if (isDJMax) {
@@ -871,6 +915,12 @@ bool Game::loadBeatmap(const std::string& path) {
         }
 
         std::cout << "Loaded " << wavIdToHandle.size() << " WAV samples" << std::endl;
+    } else if (isMalody) {
+        if (!MalodyParser::parse(actualPath, beatmap)) {
+            std::cerr << "Failed to parse Malody chart" << std::endl;
+            return false;
+        }
+        std::cout << "Loaded Malody chart: " << beatmap.keyCount << "K" << std::endl;
     } else {
         if (!OsuParser::parse(beatmapPath, beatmap)) {
             std::cerr << "Failed to parse beatmap" << std::endl;
@@ -983,35 +1033,9 @@ bool Game::loadBeatmap(const std::string& path) {
         storyboard.loadTextures(renderer.getRenderer());
     }
 
-    float od = beatmap.od;
-    if (settings.judgeMode == JudgementMode::CustomOD) {
-        od = settings.customOD;
-    }
-
-    if (settings.judgeMode == JudgementMode::CustomWindows) {
-        judgeMarvelous = settings.judgements[0].window;
-        judgePerfect = settings.judgements[1].window;
-        judgeGreat = settings.judgements[2].window;
-        judgeGood = settings.judgements[3].window;
-        judgeBad = settings.judgements[4].window;
-        judgeMiss = settings.judgements[5].window;
-    } else {
-        judgeMarvelous = 16.0;
-        judgePerfect = 64.0 - 3.0 * od;
-        judgeGreat = 97.0 - 3.0 * od;
-        judgeGood = 127.0 - 3.0 * od;
-        judgeBad = 151.0 - 3.0 * od;
-        judgeMiss = 188.0 - 3.0 * od;
-    }
-
-    // Scale judgement windows by clockRate (DT/HT compensation)
-    // In osu!, game-time windows are scaled by clockRate
-    judgeMarvelous = judgeMarvelous * clockRate;
-    judgePerfect = judgePerfect * clockRate;
-    judgeGreat = judgeGreat * clockRate;
-    judgeGood = judgeGood * clockRate;
-    judgeBad = judgeBad * clockRate;
-    judgeMiss = judgeMiss * clockRate;
+    // Initialize judgement system
+    judgementSystem.init(settings.judgeMode, beatmap.od, settings.customOD,
+                         settings.judgements, baseBPM, clockRate);
 
     if (!beatmap.notes.empty()) {
         totalNotes = 0;
@@ -1383,9 +1407,10 @@ void Game::handleInput() {
         }
         else if (e.type == SDL_EVENT_TEXT_INPUT) {
             if (state == GameState::Settings && editingUsername) {
-                // Append typed character to username (limit to 32 chars)
+                // Insert typed character at cursor position (limit to 32 chars)
                 if (settings.username.length() < 32) {
-                    settings.username += e.text.text;
+                    settings.username.insert(settingsCursorPos, e.text.text);
+                    settingsCursorPos += strlen(e.text.text);
                 }
             }
             if (state == GameState::Settings && editingScrollSpeed) {
@@ -1492,9 +1517,18 @@ void Game::handleInput() {
                     if (e.key.key == SDLK_ESCAPE || e.key.key == SDLK_RETURN) {
                         editingUsername = false;
                     } else if (e.key.key == SDLK_BACKSPACE) {
-                        if (!settings.username.empty()) {
-                            settings.username.pop_back();
+                        if (settingsCursorPos > 0 && !settings.username.empty()) {
+                            settings.username.erase(settingsCursorPos - 1, 1);
+                            settingsCursorPos--;
                         }
+                    } else if (e.key.key == SDLK_DELETE) {
+                        if (settingsCursorPos < (int)settings.username.length()) {
+                            settings.username.erase(settingsCursorPos, 1);
+                        }
+                    } else if (e.key.key == SDLK_LEFT) {
+                        if (settingsCursorPos > 0) settingsCursorPos--;
+                    } else if (e.key.key == SDLK_RIGHT) {
+                        if (settingsCursorPos < (int)settings.username.length()) settingsCursorPos++;
                     }
                 } else if (editingScrollSpeed) {
                     // Handle text input for scroll speed
@@ -1668,6 +1702,9 @@ void Game::handleInput() {
                                 state = GameState::Playing;
                                 musicStarted = false;
                                 startTime = SDL_GetTicks();
+                                // Flush keyboard events to prevent ghost key presses
+                                SDL_FlushEvent(SDL_EVENT_KEY_DOWN);
+                                SDL_FlushEvent(SDL_EVENT_KEY_UP);
                             }
                         } else {
                             // Exit to song select
@@ -1731,6 +1768,9 @@ void Game::handleInput() {
                                 state = GameState::Playing;
                                 musicStarted = false;
                                 startTime = SDL_GetTicks();
+                                // Flush keyboard events to prevent ghost key presses
+                                SDL_FlushEvent(SDL_EVENT_KEY_DOWN);
+                                SDL_FlushEvent(SDL_EVENT_KEY_UP);
                             }
                         } else {
                             // Quit to song select
@@ -1761,8 +1801,8 @@ void Game::handleInput() {
                         state = GameState::Paused;
                         break;
                     case SDLK_SPACE:
-                        // Skip functionality
-                        if (canSkip) {
+                        // Skip functionality (disabled during pause fade out)
+                        if (canSkip && !pauseFadingOut) {
                             int64_t currentTime = getCurrentGameTime();
                             if (currentTime < skipTargetTime) {
                                 // Start music first if not started
@@ -1788,6 +1828,7 @@ void Game::handleInput() {
                         if (!replayMode && !autoPlay && !pauseFadingOut) {
                             for (int i = 0; i < beatmap.keyCount; i++) {
                                 if (e.key.key == settings.keys[beatmap.keyCount - 1][i]) {
+                                    SDL_Log("KEY_INPUT: lane=%d key=%d time=%lld", i, (int)e.key.key, (long long)getCurrentGameTime());
                                     laneKeyDown[i] = true;
                                     checkJudgement(i);
                                     // Record frame
@@ -1861,7 +1902,8 @@ void Game::handleInput() {
 void Game::update() {
     int64_t elapsed = SDL_GetTicks() - startTime;
 
-    if (!musicStarted && elapsed >= PREPARE_TIME) {
+    // Don't start music during pause fade out
+    if (!musicStarted && elapsed >= PREPARE_TIME && !pauseFadingOut) {
         if (hasBackgroundMusic) {
             audio.setVolume(settings.volume);  // Restore volume after preview
             audio.play();
@@ -2061,11 +2103,11 @@ void Game::update() {
 
     for (auto& note : beatmap.notes) {
         if (note.isFakeNote) continue;  // Skip fake notes - visual only
-        if (note.state == NoteState::Waiting && note.time < currentTime - judgeBad) {
+        if (note.state == NoteState::Waiting && note.time < currentTime - judgementSystem.getBadWindow()) {
             if (note.isHold) {
                 // Hold note head missed
                 note.state = NoteState::Holding;
-                note.headHitError = judgeBad;
+                note.headHitError = judgementSystem.getBadWindow();
                 // If user is already holding the key, don't gray out, don't allow ticks
                 // User must release and re-press to get combo
                 if (laneKeyDown[note.lane]) {
@@ -2073,9 +2115,10 @@ void Game::update() {
                     note.hadComboBreak = false;
                     note.nextTickTime = INT64_MAX;  // Disable ticks
                 } else {
-                    // Normal head miss
+                    // Normal head miss - start gray transition
                     note.hadComboBreak = true;
-                    note.nextTickTime = currentTime;
+                    note.nextTickTime = currentTime;  // Allow ticks when user presses back
+                    note.headGrayStartTime = currentTime;  // Gray out immediately
                 }
                 combo = 0;  // Break combo when head is missed
             } else {
@@ -2096,7 +2139,7 @@ void Game::update() {
                 }
             }
             // Check if hold note tail timed out
-            if (note.endTime < currentTime - judgeBad) {
+            if (note.endTime < currentTime - judgementSystem.getBadWindow()) {
                 note.state = NoteState::Missed;
                 // Record miss when tail times out (whole hold note counts as 1 miss)
                 processJudgement(Judgement::Miss, note.lane);
@@ -2104,7 +2147,7 @@ void Game::update() {
         }
         // Released hold notes - no ticks, but check for timeout
         if (note.state == NoteState::Released && note.isHold) {
-            if (note.endTime < currentTime - judgeBad) {
+            if (note.endTime < currentTime - judgementSystem.getBadWindow()) {
                 note.state = NoteState::Missed;
                 processJudgement(Judgement::Miss, note.lane);
             }
@@ -2240,11 +2283,11 @@ void Game::render() {
                     settings.nightcoreEnabled = (replayInfo.mods & 512) != 0;     // NC = 0x200
                     if (settings.nightcoreEnabled) settings.doubleTimeEnabled = true;
 
-                    // Apply clock rate based on mods
-                    if (settings.halfTimeEnabled) {
-                        clockRate = 0.75;
-                    } else if (settings.doubleTimeEnabled) {
+                    // Apply clock rate based on mods (Priority: DT > HT)
+                    if (settings.doubleTimeEnabled) {
                         clockRate = 1.5;
+                    } else if (settings.halfTimeEnabled) {
+                        clockRate = 0.75;
                     } else {
                         clockRate = 1.0;
                     }
@@ -2258,18 +2301,17 @@ void Game::render() {
                     // Reinitialize PP calculator with correct star rating
                     ppCalculator.init(totalNotes, currentStarRating);
 
-                    // Rescale judgement windows by clockRate
-                    judgeMarvelous = judgeMarvelous * clockRate;
-                    judgePerfect = judgePerfect * clockRate;
-                    judgeGreat = judgeGreat * clockRate;
-                    judgeGood = judgeGood * clockRate;
-                    judgeBad = judgeBad * clockRate;
-                    judgeMiss = judgeMiss * clockRate;
+                    // Reinitialize judgement system with correct clockRate
+                    judgementSystem.init(settings.judgeMode, beatmap.od, settings.customOD,
+                                         settings.judgements, baseBPM, clockRate);
 
                     currentReplayFrame = 0;
                     state = GameState::Playing;
                     musicStarted = false;
                     startTime = SDL_GetTicks();
+                    // Flush keyboard events to prevent ghost key presses
+                    SDL_FlushEvent(SDL_EVENT_KEY_DOWN);
+                    SDL_FlushEvent(SDL_EVENT_KEY_UP);
                     // Set window title for replay mode
                     std::string title = "[REPLAY MODE] Mania Player - " + beatmap.artist + " " + beatmap.title +
                                        " [" + beatmap.version + "](" + beatmap.creator + ") Player:" + replayInfo.playerName;
@@ -2299,10 +2341,14 @@ void Game::render() {
             if (t >= 1.0f) {
                 // Transition complete, switch to playing
                 songSelectTransition = false;
+                replayMode = false;  // Reset replay mode when starting from song select
                 autoPlay = settings.autoPlayEnabled;
                 state = GameState::Playing;
                 musicStarted = false;
                 startTime = SDL_GetTicks();
+                // Flush keyboard events to prevent ghost key presses at game start
+                SDL_FlushEvent(SDL_EVENT_KEY_DOWN);
+                SDL_FlushEvent(SDL_EVENT_KEY_UP);
                 std::string title = "Mania Player - " + beatmap.artist + " " + beatmap.title;
                 renderer.setWindowTitle(title);
             } else {
@@ -2412,6 +2458,7 @@ void Game::render() {
                 else if (song.source == BeatmapSource::DJMax) sourceLabel = "DJMAX";
                 else if (song.source == BeatmapSource::O2Jam) sourceLabel = "O2Jam";
                 else if (song.source == BeatmapSource::BMS) sourceLabel = "BMS";
+                else if (song.source == BeatmapSource::Malody) sourceLabel = "Malody";
                 renderer.renderText(sourceLabel, 1280 - 80, y + 10);
             }
 
@@ -2541,6 +2588,13 @@ void Game::render() {
             if (!path.empty()) {
                 if (ReplayParser::parse(path, factoryReplayInfo)) {
                     factoryReplayPath = path;
+                    factoryMirrorInput = false;  // Reset mirror checkbox on new import
+
+                    // Create mirrored copy using auto-detected key count
+                    factoryReplayInfoMirrored = factoryReplayInfo;
+                    int keyCount = ReplayParser::detectKeyCount(factoryReplayInfo);
+                    ReplayParser::mirrorKeys(factoryReplayInfoMirrored, keyCount);
+
                     // Debug: print first few frames after import
                     std::cout << "[Import] Loaded " << factoryReplayInfo.frames.size() << " frames" << std::endl;
                     for (size_t i = 0; i < 5 && i < factoryReplayInfo.frames.size(); i++) {
@@ -2571,20 +2625,11 @@ void Game::render() {
         float exportX = boxX + fileBoxW + 10;
         if (renderer.renderButton("Export", exportX, rowY, btnW, btnH, mouseX, mouseY, mouseClicked)) {
             if (!factoryReplayPath.empty()) {
-                // Apply mirror if checkbox is checked
-                if (factoryMirrorInput) {
-                    int keyCount = 7;
-                    if (factoryReplayInfo.mods & OsuMods::Key4) keyCount = 4;
-                    else if (factoryReplayInfo.mods & OsuMods::Key5) keyCount = 5;
-                    else if (factoryReplayInfo.mods & OsuMods::Key6) keyCount = 6;
-                    else if (factoryReplayInfo.mods & OsuMods::Key7) keyCount = 7;
-                    else if (factoryReplayInfo.mods & OsuMods::Key8) keyCount = 8;
-                    else if (factoryReplayInfo.mods & OsuMods::Key9) keyCount = 9;
-                    ReplayParser::mirrorKeys(factoryReplayInfo, keyCount);
-                }
+                // Select original or mirrored version based on checkbox
+                ReplayInfo exportInfo = factoryMirrorInput ? factoryReplayInfoMirrored : factoryReplayInfo;
 
                 // Add watermark before saving
-                factoryReplayInfo.onlineScoreId = ReplayParser::createWatermark();
+                exportInfo.onlineScoreId = ReplayParser::createWatermark();
 
                 // Save to _edited.osr file (don't modify original)
                 std::string editedPath = factoryReplayPath;
@@ -2594,7 +2639,7 @@ void Game::render() {
                 } else {
                     editedPath += "_edited";
                 }
-                ReplayParser::save(editedPath, factoryReplayInfo);
+                ReplayParser::save(editedPath, exportInfo);
             }
         }
 
@@ -3294,9 +3339,9 @@ void Game::render() {
                 settings.backgroundDim, 0, 100, mouseX, mouseY, mouseDown);
         }
         else if (settingsCategory == SettingsCategory::Judgement) {
-            const char* judgeModes[] = {"Beatmap OD", "Custom OD", "Custom Windows"};
+            const char* judgeModes[] = {"Beatmap OD", "Custom OD", "Custom Windows", "O2Jam"};
             int modeIdx = static_cast<int>(settings.judgeMode);
-            int newMode = renderer.renderDropdown("Judge Mode", judgeModes, 3, modeIdx, contentX, scrolledY, 200, mouseX, mouseY, mouseClicked, judgeModeDropdownExpanded);
+            int newMode = renderer.renderDropdown("Judge Mode", judgeModes, 4, modeIdx, contentX, scrolledY, 200, mouseX, mouseY, mouseClicked, judgeModeDropdownExpanded);
             settings.judgeMode = static_cast<JudgementMode>(newMode);
 
             if (renderer.renderCheckbox("NoteLock", settings.noteLock, contentX + 220, scrolledY, mouseX, mouseY, mouseClicked)) {
@@ -3432,8 +3477,15 @@ void Game::render() {
 
             // Username input
             float usernameY = scrolledY + 120;
+            static bool wasEditingUsername = false;
             renderer.renderTextInput("Username", settings.username, contentX, usernameY, 200,
                                      mouseX, mouseY, mouseClicked, editingUsername, settingsCursorPos);
+            if (editingUsername && !wasEditingUsername) {
+                SDL_StartTextInput(renderer.getWindow());
+            } else if (!editingUsername && wasEditingUsername) {
+                SDL_StopTextInput(renderer.getWindow());
+            }
+            wasEditingUsername = editingUsername;
 
             // Force override checkbox (to the right of username input)
             if (renderer.renderCheckbox("Force Override When Exporting", settings.forceOverrideUsername,
@@ -3598,7 +3650,10 @@ void Game::render() {
         bool laneHoldActive[18] = {false};
         for (const auto& note : beatmap.notes) {
             if (note.state == NoteState::Holding && note.lane < 18) {
-                laneHoldActive[note.lane] = true;
+                // Only show LightingL if user is actually holding
+                if (laneKeyDown[note.lane]) {
+                    laneHoldActive[note.lane] = true;
+                }
             }
         }
 
@@ -3663,7 +3718,13 @@ void Game::render() {
         } else {
             renderer.renderScorePanel(settings.username.c_str(), score, calculateAccuracy(), maxCombo);
         }
-        renderer.renderHitErrorBar(hitErrors, SDL_GetTicks(), judgeMarvelous, judgePerfect, judgeGreat, judgeGood, judgeBad, judgeMiss, settings.hitErrorBarScale);
+        // Hide hit error bar in O2Jam mode (overlap-based judgement)
+        if (settings.judgeMode != JudgementMode::O2Jam) {
+            renderer.renderHitErrorBar(hitErrors, SDL_GetTicks(),
+                judgementSystem.getMarvelousWindow(), judgementSystem.getPerfectWindow(),
+                judgementSystem.getGreatWindow(), judgementSystem.getGoodWindow(),
+                judgementSystem.getBadWindow(), judgementSystem.getMissWindow(), settings.hitErrorBarScale);
+        }
         renderer.renderFPS(fps);
         renderer.renderGameInfo(currentTime, totalTime, judgementCounts, calculateAccuracy(), score);
 
@@ -3672,8 +3733,15 @@ void Game::render() {
             char perfText[128];
 
             // Judgement windows display
-            snprintf(perfText, sizeof(perfText), "Windows: %.1f/%.1f/%.1f/%.1f/%.1f/%.1f",
-                judgeMarvelous, judgePerfect, judgeGreat, judgeGood, judgeBad, judgeMiss);
+            if (settings.judgeMode == JudgementMode::O2Jam) {
+                double hiSpeed = settings.scrollSpeed / 3.657;
+                snprintf(perfText, sizeof(perfText), "Windows: Hi-Speed X%.2f", hiSpeed);
+            } else {
+                snprintf(perfText, sizeof(perfText), "Windows: %.1f/%.1f/%.1f/%.1f/%.1f/%.1f",
+                    judgementSystem.getMarvelousWindow(), judgementSystem.getPerfectWindow(),
+                    judgementSystem.getGreatWindow(), judgementSystem.getGoodWindow(),
+                    judgementSystem.getBadWindow(), judgementSystem.getMissWindow());
+            }
             renderer.renderText(perfText, 20, 575);
 
             snprintf(perfText, sizeof(perfText), "Input: %.2fms", perfInput);
@@ -3716,18 +3784,24 @@ void Game::render() {
             } else {
                 // Fade out complete, now adjust time and resume audio
                 pauseFadingOut = false;
-                if (hasBackgroundMusic) {
+                // If music hadn't started yet (paused during prepare time), just adjust startTime
+                if (!musicStarted) {
+                    int64_t totalPausedDuration = SDL_GetTicks() - pauseTime;
+                    startTime += totalPausedDuration;
+                } else if (hasBackgroundMusic) {
                     // For BGM maps, adjust startTime now
                     int64_t totalPausedDuration = SDL_GetTicks() - pauseTime;
                     startTime += totalPausedDuration;
                     pauseAudioOffset = pauseGameTime - (audio.getPosition() + settings.audioOffset);
+                    audio.resume();
+                    audio.resumeAllSamples();
                 } else {
                     // For keysound-only maps, add fadeout duration to startTime
                     int64_t fadeoutDuration = SDL_GetTicks() - pauseFadeOutStart;
                     startTime += fadeoutDuration;
+                    audio.resume();
+                    audio.resumeAllSamples();
                 }
-                audio.resume();
-                audio.resumeAllSamples();
             }
         }
 
@@ -3762,20 +3836,23 @@ Judgement Game::checkJudgement(int lane, int64_t atTime) {
     addDebugLog(currentTime, "KEY_DOWN", lane, "");
 
     // First check for Released hold notes that can be recovered
-    for (auto& note : beatmap.notes) {
-        if (note.isFakeNote) continue;  // Skip fake notes
-        if (note.state == NoteState::Released && note.lane == lane && note.isHold) {
-            // Recover the hold note
-            // osu! DOES reset tick time on recovery (method_12 sets int_10 = currentTime)
-            note.state = NoteState::Holding;
-            note.nextTickTime = currentTime;  // Reset tick timer on recovery
-            // DO NOT reset headReleaseTime - head should keep falling
-            SDL_Log("HOLD_RECOVER: lane=%d headReleaseTime=%lld", lane, (long long)note.headReleaseTime);
-            addDebugLog(currentTime, "HOLD_RECOVER", lane,
-                "noteTime=" + std::to_string(note.time) + " endTime=" + std::to_string(note.endTime) +
-                " nextTickTime=" + std::to_string(note.nextTickTime) +
-                " headReleaseTime=" + std::to_string(note.headReleaseTime));
-            return Judgement::None;
+    // O2Jam mode: hold notes cannot be recovered once released
+    if (settings.judgeMode != JudgementMode::O2Jam) {
+        for (auto& note : beatmap.notes) {
+            if (note.isFakeNote) continue;  // Skip fake notes
+            if (note.state == NoteState::Released && note.lane == lane && note.isHold) {
+                // Recover the hold note
+                // osu! DOES reset tick time on recovery (method_12 sets int_10 = currentTime)
+                note.state = NoteState::Holding;
+                note.nextTickTime = currentTime;  // Reset tick timer on recovery
+                // DO NOT reset headReleaseTime - head should keep falling
+                SDL_Log("HOLD_RECOVER: lane=%d headReleaseTime=%lld", lane, (long long)note.headReleaseTime);
+                addDebugLog(currentTime, "HOLD_RECOVER", lane,
+                    "noteTime=" + std::to_string(note.time) + " endTime=" + std::to_string(note.endTime) +
+                    " nextTickTime=" + std::to_string(note.nextTickTime) +
+                    " headReleaseTime=" + std::to_string(note.headReleaseTime));
+                return Judgement::None;
+            }
         }
     }
 
@@ -3787,9 +3864,29 @@ Judgement Game::checkJudgement(int lane, int64_t atTime) {
 
         int64_t diff = std::abs(note.time - currentTime);
 
+        // Calculate if note can be hit
+        bool canHit = false;
+        bool isMiss = false;
+        if (settings.judgeMode == JudgementMode::O2Jam) {
+            // O2Jam: overlap-based judgement
+            // Convert scrollSpeed to O2Jam Hi-Speed, scaled by clockRate (DT/NC/HT)
+            double hiSpeed = settings.scrollSpeed / 3.657 * clockRate;
+            int noteY = renderer.getNoteY(note.time, currentTime, settings.scrollSpeed, baseBPM,
+                                          settings.bpmScaleMode, beatmap.timingPoints,
+                                          settings.ignoreSV, clockRate);
+            int judgeLineY = renderer.getJudgeLineY();
+            double overlap = calcOverlapPercent(noteY, judgeLineY, Renderer::NOTE_HEIGHT, hiSpeed);
+            canHit = (overlap >= 0.20);  // Can hit if overlap >= 20%
+            isMiss = (overlap < 0.20 && currentTime > note.time);  // Miss if note passed and overlap < 20%
+        } else {
+            // Other modes: time-based judgement
+            canHit = (diff <= judgementSystem.getBadWindow());
+            isMiss = (diff <= judgementSystem.getMissWindow() && !canHit);
+        }
+
         if (settings.noteLock) {
             // NoteLock: only hit the earliest note in this lane
-            if (diff <= judgeBad) {
+            if (canHit) {
                 // Play key sound
                 keySoundManager.playKeySound(note, false);
 
@@ -3807,17 +3904,19 @@ Judgement Game::checkJudgement(int lane, int64_t atTime) {
                         lane, note.headHitEarly ? 1 : 0, (long long)currentTime, (long long)note.time);
                 } else {
                     note.state = NoteState::Hit;
+                    SDL_Log("NOTE_HIT: lane=%d noteTime=%lld currentTime=%lld diff=%lld",
+                        lane, (long long)note.time, (long long)currentTime, (long long)diff);
                     renderer.triggerLightingN(lane, currentTime);
-                    Judgement j = getJudgement(diff);
+                    Judgement j = getJudgement(diff, note.time, currentTime);
                     processJudgement(j, lane);
                 }
                 // Update next note index for this lane
                 updateLaneNextNoteIndex(laneNextNoteIndex, beatmap.notes, lane, static_cast<int>(noteIdx));
                 hitErrors.push_back({(int64_t)SDL_GetTicks(), currentTime - note.time});
-                return note.isHold ? Judgement::None : getJudgement(diff);
+                return note.isHold ? Judgement::None : getJudgement(diff, note.time, currentTime);
             }
-            // In miss window but outside 50 window -> miss
-            if (diff <= judgeMiss) {
+            // Miss judgement
+            if (isMiss) {
                 note.state = NoteState::Missed;
                 processJudgement(Judgement::Miss, lane);
                 hitErrors.push_back({(int64_t)SDL_GetTicks(), currentTime - note.time});
@@ -3834,7 +3933,7 @@ Judgement Game::checkJudgement(int lane, int64_t atTime) {
             return Judgement::None;
         } else {
             // No NoteLock
-            if (diff <= judgeBad) {
+            if (canHit) {
                 // Play key sound
                 keySoundManager.playKeySound(note, false);
 
@@ -3852,17 +3951,19 @@ Judgement Game::checkJudgement(int lane, int64_t atTime) {
                         lane, note.headHitEarly ? 1 : 0, (long long)currentTime, (long long)note.time);
                 } else {
                     note.state = NoteState::Hit;
+                    SDL_Log("NOTE_HIT: lane=%d noteTime=%lld currentTime=%lld diff=%lld",
+                        lane, (long long)note.time, (long long)currentTime, (long long)diff);
                     renderer.triggerLightingN(lane, currentTime);
-                    Judgement j = getJudgement(diff);
+                    Judgement j = getJudgement(diff, note.time, currentTime);
                     processJudgement(j, lane);
                 }
                 // Update next note index for this lane
                 updateLaneNextNoteIndex(laneNextNoteIndex, beatmap.notes, lane, static_cast<int>(noteIdx));
                 hitErrors.push_back({(int64_t)SDL_GetTicks(), currentTime - note.time});
-                return note.isHold ? Judgement::None : getJudgement(diff);
+                return note.isHold ? Judgement::None : getJudgement(diff, note.time, currentTime);
             }
-            // In miss window but outside 50 window -> miss
-            if (diff <= judgeMiss) {
+            // Miss judgement
+            if (isMiss) {
                 note.state = NoteState::Missed;
                 processJudgement(Judgement::Miss, lane);
                 hitErrors.push_back({(int64_t)SDL_GetTicks(), currentTime - note.time});
@@ -3915,7 +4016,7 @@ void Game::onKeyRelease(int lane, int64_t atTime) {
         double tailError = rawTailError;
 
         // Check if release is within tail judgement window
-        double tailWindow = judgeBad;
+        double tailWindow = judgementSystem.getBadWindow();
         if (rawTailError <= tailWindow) {
             // If head was not hit, release in tail window -> Miss
             if (!note.headHit) {
@@ -3947,28 +4048,49 @@ void Game::onKeyRelease(int lane, int64_t atTime) {
             double headError = note.headHitError;
             double combinedError = headError + tailError;
 
-            if (settings.legacyHoldJudgement) {
+            if (settings.judgeMode == JudgementMode::O2Jam) {
+                // O2Jam mode: use overlap-based judgement for hold tail
+                // Calculate tail overlap using Hi-Speed
+                double hiSpeed = settings.scrollSpeed / 3.657 * clockRate;
+                int tailNoteY = renderer.getNoteY(note.endTime, currentTime, settings.scrollSpeed, baseBPM,
+                                                   settings.bpmScaleMode, beatmap.timingPoints,
+                                                   settings.ignoreSV, clockRate);
+                int judgeLineY = renderer.getJudgeLineY();
+                double tailOverlap = calcOverlapPercent(tailNoteY, judgeLineY, Renderer::NOTE_HEIGHT, hiSpeed);
+
+                // O2Jam only has Cool/Good/Bad/Miss (no Perfect/Good100)
+                if (note.hadComboBreak) {
+                    // Had combo break - can only get Good(200) or Bad(50)
+                    if (tailOverlap >= 0.50) {
+                        j = Judgement::Great;  // Good -> 200
+                    } else {
+                        j = Judgement::Bad;    // Bad -> 50
+                    }
+                } else {
+                    j = judgementSystem.getJudgementByOverlap(tailOverlap);
+                }
+            } else if (settings.legacyHoldJudgement) {
                 // Legacy mode: simple combined error check
                 if (note.hadComboBreak) {
                     // Had combo break - can only get Great(200) or Bad(50)
-                    if (headError <= judgeGreat && combinedError <= judgeGreat * 2) {
+                    if (headError <= judgementSystem.getGreatWindow() && combinedError <= judgementSystem.getGreatWindow() * 2) {
                         j = Judgement::Great;
                     } else {
                         j = Judgement::Bad;
                     }
                 } else {
                     // Normal hold - combined judgement (legacy)
-                    if (headError <= judgeMarvelous * 1.2 &&
-                        combinedError <= judgeMarvelous * 2.4) {
+                    if (headError <= judgementSystem.getMarvelousWindow() * 1.2 &&
+                        combinedError <= judgementSystem.getMarvelousWindow() * 2.4) {
                         j = Judgement::Marvelous;
-                    } else if (headError <= judgePerfect * 1.1 &&
-                               combinedError <= judgePerfect * 2.2) {
+                    } else if (headError <= judgementSystem.getPerfectWindow() * 1.1 &&
+                               combinedError <= judgementSystem.getPerfectWindow() * 2.2) {
                         j = Judgement::Perfect;
-                    } else if (headError <= judgeGreat &&
-                               combinedError <= judgeGreat * 2) {
+                    } else if (headError <= judgementSystem.getGreatWindow() &&
+                               combinedError <= judgementSystem.getGreatWindow() * 2) {
                         j = Judgement::Great;
-                    } else if (headError <= judgeGood &&
-                               combinedError <= judgeGood * 2) {
+                    } else if (headError <= judgementSystem.getGoodWindow() &&
+                               combinedError <= judgementSystem.getGoodWindow() * 2) {
                         j = Judgement::Good;
                     } else {
                         j = Judgement::Bad;
@@ -3977,23 +4099,23 @@ void Game::onKeyRelease(int lane, int64_t atTime) {
             } else {
                 // osu! mode: use same logic as legacy (since legacy results match osu!)
                 if (note.hadComboBreak) {
-                    if (headError <= judgeGreat && combinedError <= judgeGreat * 2) {
+                    if (headError <= judgementSystem.getGreatWindow() && combinedError <= judgementSystem.getGreatWindow() * 2) {
                         j = Judgement::Great;
                     } else {
                         j = Judgement::Bad;
                     }
                 } else {
-                    if (headError <= judgeMarvelous * 1.2 &&
-                        combinedError <= judgeMarvelous * 2.4) {
+                    if (headError <= judgementSystem.getMarvelousWindow() * 1.2 &&
+                        combinedError <= judgementSystem.getMarvelousWindow() * 2.4) {
                         j = Judgement::Marvelous;
-                    } else if (headError <= judgePerfect * 1.1 &&
-                               combinedError <= judgePerfect * 2.2) {
+                    } else if (headError <= judgementSystem.getPerfectWindow() * 1.1 &&
+                               combinedError <= judgementSystem.getPerfectWindow() * 2.2) {
                         j = Judgement::Perfect;
-                    } else if (headError <= judgeGreat &&
-                               combinedError <= judgeGreat * 2) {
+                    } else if (headError <= judgementSystem.getGreatWindow() &&
+                               combinedError <= judgementSystem.getGreatWindow() * 2) {
                         j = Judgement::Great;
-                    } else if (headError <= judgeGood &&
-                               combinedError <= judgeGood * 2) {
+                    } else if (headError <= judgementSystem.getGoodWindow() &&
+                               combinedError <= judgementSystem.getGoodWindow() * 2) {
                         j = Judgement::Good;
                     } else {
                         j = Judgement::Bad;
@@ -4004,7 +4126,7 @@ void Game::onKeyRelease(int lane, int64_t atTime) {
             // Call processJudgement to update combo and score
             processJudgement(j, lane);
             hitErrors.push_back({(int64_t)SDL_GetTicks(), currentTime - note.endTime});
-        } else if (currentTime < note.endTime - judgeBad) {
+        } else if (currentTime < note.endTime - judgementSystem.getBadWindow()) {
             // Released early (mid-hold) - process ticks up to current time first
             if (note.nextTickTime != INT64_MAX) {
                 while (note.nextTickTime + 100 <= currentTime) {
@@ -4039,12 +4161,21 @@ void Game::onKeyRelease(int lane, int64_t atTime) {
     }
 }
 
-Judgement Game::getJudgement(int64_t diff) {
-    if (diff <= judgeMarvelous) return Judgement::Marvelous;
-    if (diff <= judgePerfect) return Judgement::Perfect;
-    if (diff <= judgeGreat) return Judgement::Great;
-    if (diff <= judgeGood) return Judgement::Good;
-    return Judgement::Bad;
+Judgement Game::getJudgement(int64_t diff, int64_t noteTime, int64_t currentTime) {
+    // For O2Jam mode, use overlap-based judgement
+    if (settings.judgeMode == JudgementMode::O2Jam) {
+        // Convert scrollSpeed to O2Jam Hi-Speed, scaled by clockRate (DT/NC/HT)
+        double hiSpeed = settings.scrollSpeed / 3.657 * clockRate;
+        int noteY = renderer.getNoteY(noteTime, currentTime, settings.scrollSpeed, baseBPM,
+                                       settings.bpmScaleMode, beatmap.timingPoints,
+                                       settings.ignoreSV, clockRate);
+        int judgeLineY = renderer.getJudgeLineY();
+        double overlap = calcOverlapPercent(noteY, judgeLineY, Renderer::NOTE_HEIGHT, hiSpeed);
+        return judgementSystem.getJudgementByOverlap(overlap);
+    }
+
+    // For other modes, use time-based judgement
+    return judgementSystem.getJudgement(diff);
 }
 
 void Game::processJudgement(Judgement j, int lane) {
@@ -4333,8 +4464,8 @@ void Game::scanSongsFolder() {
         song.folderPath = entry.string();
         song.folderName = entry.filename().string();
 
-        // Scan for beatmap files
-        for (const auto& file : fs::directory_iterator(entry)) {
+        // Scan for beatmap files (including subdirectories for Malody support)
+        for (const auto& file : fs::recursive_directory_iterator(entry)) {
             if (!file.is_regular_file()) continue;
             std::string ext = file.path().extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
@@ -4585,6 +4716,29 @@ void Game::scanSongsFolder() {
 
                 song.beatmapFiles.push_back(diff.path);
                 song.difficulties.push_back(diff);
+            } else if (ext == ".mc") {
+                // Malody chart - only Key mode (mode=0) is supported
+                BeatmapInfo tempInfo;
+                if (!MalodyParser::parse(file.path().string(), tempInfo)) {
+                    // Unsupported mode (catch, ring, etc.) - skip this file
+                    continue;
+                }
+
+                song.source = BeatmapSource::Malody;
+
+                DifficultyInfo diff;
+                diff.path = file.path().string();
+                diff.keyCount = tempInfo.keyCount;
+                diff.version = tempInfo.version.empty() ? file.path().stem().string() : tempInfo.version;
+                diff.creator = tempInfo.creator;
+                diff.hash = tempInfo.beatmapHash;
+                diff.starRatings[0] = calculateStarRating(tempInfo.notes, diff.keyCount,
+                    StarRatingVersion::OsuStable_b20260101);
+                diff.starRatings[1] = calculateStarRating(tempInfo.notes, diff.keyCount,
+                    StarRatingVersion::OsuStable_b20220101);
+
+                song.beatmapFiles.push_back(diff.path);
+                song.difficulties.push_back(diff);
             }
         }
 
@@ -4695,6 +4849,30 @@ void Game::scanSongsFolder() {
             if (BMSParser::parse(firstFile, info)) {
                 song.title = info.title;
                 song.artist = info.artist;
+            }
+            song.previewTime = -1;  // 40% position
+        } else if (song.source == BeatmapSource::Malody) {
+            BeatmapInfo info;
+            if (MalodyParser::parse(firstFile, info)) {
+                song.title = info.title;
+                song.artist = info.artist;
+                // Get background and audio from the same directory as the .mc file
+                fs::path mcPath(firstFile);
+                fs::path mcDir = mcPath.parent_path();
+                // Look for background image
+                for (const auto& f : fs::directory_iterator(mcDir)) {
+                    if (!f.is_regular_file()) continue;
+                    std::string ext = f.path().extension().string();
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    if (ext == ".jpg" || ext == ".png" || ext == ".jpeg") {
+                        song.backgroundPath = f.path().string();
+                        break;
+                    }
+                }
+                // Audio path from beatmap
+                if (!info.audioFilename.empty()) {
+                    song.audioPath = (mcDir / info.audioFilename).string();
+                }
             }
             song.previewTime = -1;  // 40% position
         }

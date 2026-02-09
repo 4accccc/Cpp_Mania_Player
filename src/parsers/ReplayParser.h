@@ -40,6 +40,7 @@ public:
     static std::string getBeatmapHash(const std::string& filepath);
     static std::string calculateReplayHash(const ReplayInfo& info);
     static void mirrorKeys(ReplayInfo& info, int keyCount);
+    static int detectKeyCount(const ReplayInfo& info);  // Detect key count from replay data
 
     // Watermark functions
     static int64_t createWatermark();  // Create watermark with current time

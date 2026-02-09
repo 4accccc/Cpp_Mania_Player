@@ -581,6 +581,44 @@ void ReplayParser::mirrorKeys(ReplayInfo& info, int keyCount) {
     std::cout << "[Mirror] Done. Modified=" << modifiedCount << ", Skipped=" << skippedCount << std::endl;
 }
 
+int ReplayParser::detectKeyCount(const ReplayInfo& info) {
+    // First detect from replay data by finding highest bit used
+    int maxBit = 0;
+    for (const auto& frame : info.frames) {
+        // Skip special frames (negative y values are markers, not real input)
+        if (frame.y < 0) continue;
+
+        int keyState = (int)frame.x;
+        if (keyState > 0) {
+            int bit = 0;
+            int temp = keyState;
+            while (temp > 0) {
+                bit++;
+                temp >>= 1;
+            }
+            if (bit > maxBit) maxBit = bit;
+        }
+    }
+
+    if (maxBit >= 4) {
+        std::cout << "[DetectKeyCount] Detected " << maxBit << "K from replay data" << std::endl;
+        return maxBit;
+    }
+
+    // Fallback: check mods for explicit key count
+    const int Key4 = 32768, Key5 = 65536, Key6 = 131072;
+    const int Key7 = 262144, Key8 = 524288, Key9 = 1048576;
+
+    if (info.mods & Key4) return 4;
+    if (info.mods & Key5) return 5;
+    if (info.mods & Key6) return 6;
+    if (info.mods & Key7) return 7;
+    if (info.mods & Key8) return 8;
+    if (info.mods & Key9) return 9;
+
+    return 7;  // Default 7K
+}
+
 // Watermark magic bytes: "MG" (0x4D, 0x47)
 const uint16_t WATERMARK_MAGIC = 0x474D;  // Little-endian "MG"
 

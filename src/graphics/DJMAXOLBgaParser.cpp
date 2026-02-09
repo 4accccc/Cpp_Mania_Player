@@ -6,7 +6,6 @@
 #include <vector>
 #include <algorithm>
 
-// DEPRECATED. BUGGY. WAITING FOR FIX.
 namespace fs = std::filesystem;
 
 // CRC32 lookup table (standard polynomial)

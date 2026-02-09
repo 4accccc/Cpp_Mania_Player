@@ -14,7 +14,8 @@ struct JudgementConfig {
 enum class JudgementMode {
     BeatmapOD,
     CustomOD,
-    CustomWindows
+    CustomWindows,
+    O2Jam
 };
 
 enum class SettingsCategory {
