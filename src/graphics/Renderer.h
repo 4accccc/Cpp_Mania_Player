@@ -28,7 +28,7 @@ public:
     void renderLanes();
     void renderStageBottom();
     void renderStageBorders();
-    void renderKeys(const bool* laneKeyDown, int keyCount);
+    void renderKeys(const bool* laneKeyDown, int keyCount, int64_t currentTime);
     void renderHitLighting(const bool* laneKeyDown, int keyCount);
     void renderNoteLighting(const bool* laneHoldActive, int keyCount, int64_t currentTime);  // LightingN/LightingL effects
     void triggerLightingN(int lane, int64_t time);  // Trigger LightingN animation on note hit
@@ -48,7 +48,8 @@ public:
     void renderScorePanel(const char* playerName, int score, double accuracy, int maxCombo);
     void renderHitErrorBar(const std::vector<HitError>& errors, int64_t currentTime,
                            int64_t window300g, int64_t window300, int64_t window200,
-                           int64_t window100, int64_t window50, int64_t windowMiss, float scale);
+                           int64_t window100, int64_t window50, int64_t windowMiss,
+                           const bool* enabled, float scale);
     void renderResult(const std::string& title, const std::string& creator,
                       const int* judgeCounts, double accuracy, int maxCombo, int score);
     void renderMenu();
@@ -62,6 +63,7 @@ public:
     void renderCategoryButton(const char* text, float x, float y, float w, float h, bool selected);
     void renderKeyBindingUI(SDL_Keycode* keys, int keyCount, int currentIndex);
     void renderText(const char* text, float x, float y);
+    void renderTextRight(const char* text, float rightX, float y);  // Right-aligned text
     void renderTextClipped(const char* text, float x, float y, float maxWidth);
     void renderLabel(const char* text, float x, float y);
     int renderDropdown(const char* label, const char** options, int optionCount, int selected, float x, float y, float w, int mouseX, int mouseY, bool clicked, bool& expanded);
@@ -91,6 +93,7 @@ public:
     void setKeyCount(int count);
     int getKeyCount() const { return keyCount; }
     void resetHitErrorIndicator();
+    void resetKeyReleaseTime();
     void setSkinManager(SkinManager* skin) { skinManager = skin; }
 
 private:
@@ -127,10 +130,14 @@ private:
     // LightingN animation (per lane hit time)
     int64_t lightingNHitTime[18];      // Time when note was hit (for LightingN animation)
 
+    // Key release time tracking (for 80ms hold after release)
+    int64_t keyReleaseTime[18];        // Time when key was released
+    bool prevKeyDown[18];              // Previous frame key state
+
     float getLaneX(int lane) const;
     float getLaneWidth(int lane) const;
     float getColumnSpacing(int lane) const;
-    int getHoldHeadY(const Note& note, int naturalY, int64_t currentTime, int scrollSpeed) const;
+    int getHoldHeadY(const Note& note, int naturalY, int64_t currentTime, int scrollSpeed, int releaseNaturalY) const;
     double getSVMultiplier(int64_t time, const std::vector<TimingPoint>& timingPoints) const;
     double getBaseBeatLength(int64_t time, const std::vector<TimingPoint>& timingPoints) const;
     void updateLaneLayout();

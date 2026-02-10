@@ -12,14 +12,15 @@
 - Be-Music Script [*.bms]
 - DJMAX RESPECT [*.bytes]
 - DJMAX ONLINE [*.pt]
+- Malody [*.mc]
+- MUSYNX/MUSYNC [*.txt]
 - osu!mania [*.osu] ([EXPERIMENTAL]support standard converted maps)
 - O2Jam [*.ojn]
 
 ### Formats planned to support
-- Malody
+
 - EZ2DJ/EZ2ON
 - Stepmania
-- MUSYNX/MUSYNC
 - Beatmania IIDX
 
 ## Dependencies
@@ -51,8 +52,10 @@ This project uses the following third-party libraries:
 | [stb_image](https://github.com/nothings/stb) | MIT/Public Domain | Image loading |
 | [stb_vorbis](https://github.com/nothings/stb) | MIT/Public Domain | Vorbis audio decoding |
 
-# Changelog
+## Changelog
+
 ### Mania Player v0.0.1b
+
 - 新增支持读取osu!的谱面
 - 新增支持使用osu!的皮肤
 - 新增AutoPlay,IgnoreSV(原创),Hidden,FadeIn Mod
@@ -133,6 +136,24 @@ This project uses the following third-party libraries:
 - 修复了准备时间时暂停游戏后判定出现异常的问题
 - 新增 Malody 谱面读取
 - 新增 O2Jam 判定模式 (overlap-based)
+
+
+
+### Mania Player v0.0.5b
+
+- 修复了osu!皮肤部分元件的错误拉伸，显示异常问题
+- 修复了自定义判定窗口无法保存的问题
+- 修复了自定义判定窗口无法禁用某一个判定等级的问题
+- 修复了自定义判定窗口使用过于离谱的值的时候无法正确应用的问题
+- 修复了长条断开时头尾落速不一致的问题
+- 修复了当游玩 DJMAX RESPECT 谱面时，点击跳过键会导致背景音乐消失的问题
+- 修复了歌曲选择界面谱面来源标签在一些特殊情况下会被窗口截断的问题
+- 修复了一些谱面打开DT/NC/HT效果对背景音乐无效的问题
+- 修复了 BMS 谱面元信息解析异常的问题
+- 修复了 BMS 图片 BGA 播放异常的问题
+- 新增加载界面，支持在加载过程中使用esc打断加载
+- 新增 osu! 皮肤高分辨率图片资源(*@2x)读取
+- 新增 MUSYNX 谱面，key音读取
 
 
 

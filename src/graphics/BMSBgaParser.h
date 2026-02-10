@@ -50,10 +50,18 @@ public:
     // Check if has BGA
     bool hasBga() const { return !events_.empty(); }
 
+    // Trigger miss layer (Poor BGA) display
+    void triggerMissLayer(int64_t time);
+
+    // Set miss layer duration (default 500ms)
+    void setMissLayerDuration(int64_t duration) { missLayerDuration_ = duration; }
+
 private:
     SDL_Texture* loadTexture(const std::string& filename);
+    SDL_Texture* loadTextureWithColorKey(const std::string& filename, bool useColorKey);
     VideoPlayer* loadVideo(const std::string& filename);
     bool isVideoFile(const std::string& filename);
+    void recalculateState(int64_t currentTime);  // Recalculate BGA state from scratch
 
     SDL_Renderer* renderer_ = nullptr;
     std::string directory_;
@@ -63,7 +71,12 @@ private:
     std::unordered_map<int, VideoPlayer*> videoCache_;
     std::unordered_map<int, BgaMediaType> mediaTypeCache_;
     size_t currentIndex_ = 0;
+    int64_t lastUpdateTime_ = INT64_MIN;  // Track last update time for seek detection
 
     // Three layers: BGA base, Layer, Poor
     BMSBgaLayer layers_[3];
+
+    // Miss layer (Poor BGA) state
+    int64_t missLayerStartTime_ = 0;      // When miss layer started showing
+    int64_t missLayerDuration_ = 500;     // How long to show miss layer (ms)
 };

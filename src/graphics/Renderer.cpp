@@ -13,6 +13,8 @@ Renderer::Renderer() : window(nullptr), renderer(nullptr), font(nullptr),
     // Initialize lightingN hit times
     for (int i = 0; i < 18; i++) {
         lightingNHitTime[i] = INT64_MIN;  // Far in the past (avoid triggering during prepare time)
+        keyReleaseTime[i] = 0;
+        prevKeyDown[i] = false;
     }
 }
 
@@ -56,6 +58,13 @@ void Renderer::resetHitErrorIndicator() {
     // Reset lightingN hit times to prevent ghost effects
     for (int i = 0; i < 18; i++) {
         lightingNHitTime[i] = INT64_MIN;
+    }
+}
+
+void Renderer::resetKeyReleaseTime() {
+    for (int i = 0; i < 18; i++) {
+        keyReleaseTime[i] = 0;
+        prevKeyDown[i] = false;
     }
 }
 
@@ -340,7 +349,7 @@ int Renderer::getNoteY(int64_t noteTime, int64_t currentTime, int scrollSpeed, d
     return judgeLineY - NOTE_HEIGHT - static_cast<int>(pixelOffset);
 }
 
-int Renderer::getHoldHeadY(const Note& note, int naturalY, int64_t currentTime, int scrollSpeed) const {
+int Renderer::getHoldHeadY(const Note& note, int naturalY, int64_t currentTime, int scrollSpeed, int releaseNaturalY) const {
     int y = naturalY;
     int judgeY = judgeLineY - NOTE_HEIGHT;
 
@@ -349,27 +358,13 @@ int Renderer::getHoldHeadY(const Note& note, int naturalY, int64_t currentTime, 
     }
 
     if (note.headReleaseTime > 0) {
-        float fallSpeed = 0.6f * scrollSpeed / 18.0f;
-
-        if (note.headHitEarly) {
-            // Early hit - check if head has reached judge line yet
-            if (naturalY < judgeY) {
-                // Head hasn't reached judge line - continue natural fall
-                y = naturalY;
-            } else {
-                // Head has reached judge line - fall from judge line
-                // Head reached judge line at note.time
-                int64_t fallStartTime = std::max(note.headReleaseTime, note.time);
-                int64_t fallTime = currentTime - fallStartTime;
-                if (fallTime > 0) {
-                    y = judgeY + (int)(fallTime * fallSpeed);
-                } else {
-                    y = judgeY;
-                }
-            }
+        if (note.headHitEarly && naturalY < judgeY) {
+            // Early hit, head hasn't reached judge line yet - continue natural fall
+            y = naturalY;
         } else {
-            // Late hit - head was at judge line, fall from there
-            y = judgeY + (int)((currentTime - note.headReleaseTime) * fallSpeed);
+            // Head was at judge line when released - fall from judge line at natural speed
+            // Use offset from release moment to maintain consistent speed with tail
+            y = judgeY + (naturalY - releaseNaturalY);
         }
     } else if (note.state == NoteState::Holding) {
         if (note.headHitEarly) {
@@ -468,7 +463,6 @@ void Renderer::renderStageBottom() {
 }
 
 void Renderer::renderStageBorders() {
-    float scale = (float)windowHeight / 480.0f;
     float stageX = (float)getLaneX(0);
     float stageEndX = stageX;
     for (int i = 0; i < keyCount; i++) {
@@ -476,29 +470,37 @@ void Renderer::renderStageBorders() {
         if (i < keyCount - 1) stageEndX += getColumnSpacing(i);
     }
 
-    // Left border
+    // Left border - Anchor: TopLeft, Origin: TopRight
     SDL_Texture* leftTex = skinManager ? skinManager->getStageLeftTexture() : nullptr;
     if (leftTex) {
         float texW, texH;
         SDL_GetTextureSize(leftTex, &texW, &texH);
-        float borderW = texW * scale;
+        // X: keep original width, divide by ScaleAdjust for @2x
+        // Y: stretch to fill stage height
+        float scaleAdjust = skinManager->getTextureScaleAdjust(leftTex);
+        float borderW = texW / scaleAdjust;
+        float borderH = (float)windowHeight;
+        // Origin TopRight: right edge of texture aligns to stage left edge
         float x = stageX - borderW;
-        SDL_FRect dst = { x, 0, borderW, (float)windowHeight };
+        SDL_FRect dst = { x, 0, borderW, borderH };
         SDL_RenderTexture(renderer, leftTex, nullptr, &dst);
     }
 
-    // Right border
+    // Right border - Anchor: TopRight, Origin: TopLeft
     SDL_Texture* rightTex = skinManager ? skinManager->getStageRightTexture() : nullptr;
     if (rightTex) {
         float texW, texH;
         SDL_GetTextureSize(rightTex, &texW, &texH);
-        float borderW = texW * scale;
-        SDL_FRect dst = { stageEndX, 0, borderW, (float)windowHeight };
+        float scaleAdjust = skinManager->getTextureScaleAdjust(rightTex);
+        float borderW = texW / scaleAdjust;
+        float borderH = (float)windowHeight;
+        // Origin TopLeft: left edge of texture aligns to stage right edge
+        SDL_FRect dst = { stageEndX, 0, borderW, borderH };
         SDL_RenderTexture(renderer, rightTex, nullptr, &dst);
     }
 }
 
-void Renderer::renderKeys(const bool* laneKeyDown, int count) {
+void Renderer::renderKeys(const bool* laneKeyDown, int count, int64_t currentTime) {
     // Use 768 scale for skin values (pre-scaled from 480 to 768)
     float scale = (float)windowHeight / 768.0f;
     const ManiaConfig* cfg = skinManager ? skinManager->getManiaConfig(keyCount) : nullptr;
@@ -512,8 +514,19 @@ void Renderer::renderKeys(const bool* laneKeyDown, int count) {
         float x = (float)getLaneX(i);
         float w = getLaneWidth(i);
 
+        // Track key release time for 80ms hold effect
+        if (prevKeyDown[i] && !laneKeyDown[i]) {
+            // Key was just released
+            keyReleaseTime[i] = currentTime;
+        }
+        prevKeyDown[i] = laneKeyDown[i];
+
+        // Show pressed texture if key is down OR within 80ms after release
+        bool showPressed = laneKeyDown[i] ||
+            (keyReleaseTime[i] > 0 && currentTime - keyReleaseTime[i] < 80);
+
         SDL_Texture* keyTex = nullptr;
-        if (laneKeyDown[i]) {
+        if (showPressed) {
             keyTex = skinManager ? skinManager->getKeyDownTexture(i, keyCount) : nullptr;
         } else {
             keyTex = skinManager ? skinManager->getKeyTexture(i, keyCount) : nullptr;
@@ -964,7 +977,11 @@ void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int sc
 
         // Handle hold note head position based on hit timing
         if (note.isHold) {
-            y = getHoldHeadY(note, y, currentTime, scrollSpeed);
+            int releaseNaturalY = 0;
+            if (note.headReleaseTime > 0) {
+                releaseNaturalY = getNoteY(note.time, note.headReleaseTime, scrollSpeed, baseBPM, bpmScaleMode, timingPoints, ignoreSV, clockRate);
+            }
+            y = getHoldHeadY(note, y, currentTime, scrollSpeed, releaseNaturalY);
         }
 
         if (y > windowHeight) {
@@ -1160,23 +1177,47 @@ void Renderer::renderNotes(std::vector<Note>& notes, int64_t currentTime, int sc
                 }
             }
 
-            // Render tail with its own alpha (bottom aligned to body top)
-            // Don't render tail if it has passed the head position (endY > y)
-            if (endY >= -NOTE_HEIGHT * 3 && endY <= windowHeight && endY <= y && tailAlpha > 0) {
+            // Render tail with its own alpha
+            // Tail disappears at headCenter (same as body), not at head position
+            float tailBottom = (float)(endY + NOTE_HEIGHT);  // Tail bottom position
+            if (endY >= -NOTE_HEIGHT * 3 && tailBottom <= headCenter && tailAlpha > 0) {
                 if (tailTex) {
-                    float tailY = (float)(endY + NOTE_HEIGHT) - tailH;  // Tail bottom aligns to body top
+                    float tailY = tailBottom - tailH;  // Tail top position
+
+                    // Clip tail if it extends beyond headCenter
+                    float visibleTailH = tailH;
+                    float srcY = 0;
+                    if (tailY + tailH > headCenter) {
+                        // Tail extends beyond headCenter, need to clip
+                        visibleTailH = headCenter - tailY;
+                        if (visibleTailH <= 0) {
+                            // Tail completely hidden
+                            goto skip_tail;
+                        }
+                        // For vertically flipped texture, clip from top of source
+                        srcY = tailH - visibleTailH;
+                    }
+
                     SDL_SetTextureAlphaMod(tailTex, tailAlpha);
-                    SDL_SetTextureColorMod(tailTex, texMod, texMod, texMod);  // Gray when missed
-                    SDL_FRect tail = { (float)x, tailY, (float)w, tailH };
-                    // Flip tail texture vertically (osu! default behavior)
-                    SDL_RenderTextureRotated(renderer, tailTex, nullptr, &tail, 0, nullptr, SDL_FLIP_VERTICAL);
+                    SDL_SetTextureColorMod(tailTex, texMod, texMod, texMod);
+
+                    float texW, texH;
+                    SDL_GetTextureSize(tailTex, &texW, &texH);
+                    // Source rect for clipping (accounting for vertical flip)
+                    SDL_FRect srcRect = { 0, srcY * (texH / tailH), texW, visibleTailH * (texH / tailH) };
+                    SDL_FRect dstRect = { (float)x, tailY, (float)w, visibleTailH };
+                    SDL_RenderTextureRotated(renderer, tailTex, &srcRect, &dstRect, 0, nullptr, SDL_FLIP_VERTICAL);
                 } else {
                     Uint8 tailBodyAlpha = (Uint8)(64 * tailAlpha / 255);
                     SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, tailBodyAlpha);
-                    SDL_FRect tail = { (float)x, (float)endY, (float)w, (float)NOTE_HEIGHT };
-                    SDL_RenderFillRect(renderer, &tail);
+                    float clipH = std::min((float)NOTE_HEIGHT, headCenter - (float)endY);
+                    if (clipH > 0) {
+                        SDL_FRect tail = { (float)x, (float)endY, (float)w, clipH };
+                        SDL_RenderFillRect(renderer, &tail);
+                    }
                 }
             }
+            skip_tail:;
         }
 
         // Skip head rendering for fake notes (only tail is rendered)
@@ -1256,6 +1297,11 @@ void Renderer::renderHitJudgement(int judgement, int64_t elapsedMs) {
 
     float texW, texH;
     SDL_GetTextureSize(tex, &texW, &texH);
+
+    // Apply @2x scale adjust
+    float scaleAdj = skinManager->getTextureScaleAdjust(tex);
+    texW /= scaleAdj;
+    texH /= scaleAdj;
 
     // Center on stage
     float stageX = (float)getLaneX(0);
@@ -1410,14 +1456,17 @@ void Renderer::renderCombo(int combo, int64_t comboAnimTime, bool comboBreak, in
             int len = (int)strlen(buf);
             float digitTotalW = 0;
             std::vector<SDL_Texture*> digitTextures;
+            std::vector<float> digitScales;
             for (int i = 0; i < len; i++) {
                 int digit = buf[i] - '0';
                 SDL_Texture* tex = skinManager->getComboDigitTexture(digit);
                 if (!tex) { useSkinDigits = false; break; }
                 float texW, texH;
                 SDL_GetTextureSize(tex, &texW, &texH);
+                float scaleAdj = skinManager->getTextureScaleAdjust(tex);
                 digitTextures.push_back(tex);
-                digitTotalW += texW;
+                digitScales.push_back(scaleAdj);
+                digitTotalW += texW / scaleAdj;
             }
             if (useSkinDigits && !digitTextures.empty()) {
                 float startX = centerX - (digitTotalW * breakScale) / 2;
@@ -1426,9 +1475,12 @@ void Renderer::renderCombo(int combo, int64_t comboAnimTime, bool comboBreak, in
                     SDL_Texture* tex = digitTextures[i];
                     float texW, texH;
                     SDL_GetTextureSize(tex, &texW, &texH);
-                    float w = texW * breakScale;
-                    float h = texH * breakScale;
-                    float y = comboY - (h - texH) / 2;
+                    float scaleAdj = digitScales[i];
+                    float baseW = texW / scaleAdj;
+                    float baseH = texH / scaleAdj;
+                    float w = baseW * breakScale;
+                    float h = baseH * breakScale;
+                    float y = comboY - (h - baseH) / 2;
                     SDL_SetTextureColorMod(tex, colorBreak.r, colorBreak.g, colorBreak.b);
                     SDL_SetTextureAlphaMod(tex, (uint8_t)(alpha * 255));
                     SDL_FRect dst = { curX, y, w, h };
@@ -1478,6 +1530,7 @@ void Renderer::renderCombo(int combo, int64_t comboAnimTime, bool comboBreak, in
         float digitTotalW = 0;
         std::vector<SDL_Texture*> digitTextures;
         std::vector<float> digitWidths;
+        std::vector<float> digitScales;
 
         for (int i = 0; i < len; i++) {
             int digit = buf[i] - '0';
@@ -1488,9 +1541,11 @@ void Renderer::renderCombo(int combo, int64_t comboAnimTime, bool comboBreak, in
             }
             float texW, texH;
             SDL_GetTextureSize(tex, &texW, &texH);
+            float scaleAdj = skinManager->getTextureScaleAdjust(tex);
             digitTextures.push_back(tex);
-            digitWidths.push_back(texW);
-            digitTotalW += texW;
+            digitWidths.push_back(texW / scaleAdj);
+            digitScales.push_back(scaleAdj);
+            digitTotalW += texW / scaleAdj;
         }
 
         if (useSkinDigits && !digitTextures.empty()) {
@@ -1501,10 +1556,13 @@ void Renderer::renderCombo(int combo, int64_t comboAnimTime, bool comboBreak, in
                 SDL_Texture* tex = digitTextures[i];
                 float texW, texH;
                 SDL_GetTextureSize(tex, &texW, &texH);
+                float scaleAdj = digitScales[i];
+                float baseW = texW / scaleAdj;
+                float baseH = texH / scaleAdj;
 
-                float w = texW;
-                float h = texH * scaleY;
-                float y = comboY - (h - texH) / 2;  // Adjust for Y scale
+                float w = baseW;
+                float h = baseH * scaleY;
+                float y = comboY - (h - baseH) / 2;  // Adjust for Y scale
 
                 SDL_FRect dst = { curX, y, w, h };
                 // Apply hold color modulation
@@ -1567,9 +1625,17 @@ void Renderer::renderHPBar(double hpPercent) {
     float fillHeight = barHeight * (float)hpPercent;
 
     if (bgTex && fillTex) {
-        float bgW, bgH, fillW, fillH;
-        SDL_GetTextureSize(bgTex, &bgW, &bgH);
-        SDL_GetTextureSize(fillTex, &fillW, &fillH);
+        float bgTexW, bgTexH, fillTexW, fillTexH;
+        SDL_GetTextureSize(bgTex, &bgTexW, &bgTexH);
+        SDL_GetTextureSize(fillTex, &fillTexW, &fillTexH);
+
+        // Apply @2x scale adjust
+        float bgScale = skinManager->getTextureScaleAdjust(bgTex);
+        float fillScale = skinManager->getTextureScaleAdjust(fillTex);
+        float bgW = bgTexW / bgScale;
+        float bgH = bgTexH / bgScale;
+        float fillW = fillTexW / fillScale;
+        float fillH = fillTexH / fillScale;
 
         // osu! mania: scale 0.7, extra Y scale = windowHeight/480
         const float MANIA_SCALE = 0.7f;
@@ -1593,9 +1659,12 @@ void Renderer::renderHPBar(double hpPercent) {
         // Fill: clip width based on HP, same rotation
         // After rotation, fill should be BOTTOM aligned with background
         if (hpPercent > 0) {
-            float clipW = fillW * (float)hpPercent;
-            SDL_FRect fillSrc = { 0, 0, clipW, fillH };
+            // fillSrc uses original texture coordinates
+            float clipTexW = fillTexW * (float)hpPercent;
+            SDL_FRect fillSrc = { 0, 0, clipTexW, fillTexH };
 
+            // Scaled size uses logical size (after @2x adjustment)
+            float clipW = fillW * (float)hpPercent;
             float scaledFillW = clipW * MANIA_SCALE;
             float scaledFillH = fillH * MANIA_SCALE * extraScale;
 
@@ -1649,8 +1718,13 @@ void Renderer::renderHPBarKi(double currentHP, float barX, float barY, float sca
 
     if (!kiTex) return;
 
-    float kiW, kiH;
-    SDL_GetTextureSize(kiTex, &kiW, &kiH);
+    float kiTexW, kiTexH;
+    SDL_GetTextureSize(kiTex, &kiTexW, &kiTexH);
+
+    // Apply @2x scale adjust
+    float kiScale = skinManager->getTextureScaleAdjust(kiTex);
+    float kiW = kiTexW / kiScale;
+    float kiH = kiTexH / kiScale;
 
     // Position Ki at the top of the HP bar (end of fill)
     float scaledW = kiW * scale;
@@ -1745,15 +1819,28 @@ void Renderer::renderGameInfo(int64_t currentTime, int64_t totalTime, const int*
 
 void Renderer::renderHitErrorBar(const std::vector<HitError>& errors, int64_t currentTime,
                                  int64_t window300g, int64_t window300, int64_t window200,
-                                 int64_t window100, int64_t window50, int64_t windowMiss, float scale) {
+                                 int64_t window100, int64_t window50, int64_t windowMiss,
+                                 const bool* enabled, float scale) {
     // osu!mania style hit error bar
 
+    // Calculate max enabled window for bar width
+    int64_t maxWindow = windowMiss;
+    if (enabled) {
+        // Find the largest enabled window
+        if (enabled[5]) maxWindow = windowMiss;
+        else if (enabled[4]) maxWindow = window50;
+        else if (enabled[3]) maxWindow = window100;
+        else if (enabled[2]) maxWindow = window200;
+        else if (enabled[1]) maxWindow = window300;
+        else if (enabled[0]) maxWindow = window300g;
+    }
+
     // Bar dimensions per osu! spec
-    float barWidth = (float)windowMiss * scale;  // 最大判定窗口 × 缩放
-    float barHeight = 3.0f * scale;              // 基础高度
-    float bgHeight = barHeight * 4.0f;           // 背景高度 = 基础高度 × 4
+    float barWidth = (float)maxWindow * scale;  // Max enabled window × scale
+    float barHeight = 3.0f * scale;              // Base height
+    float bgHeight = barHeight * 4.0f;           // Background height = base × 4
     float barX = (float)(windowWidth / 2) - barWidth / 2;
-    float barY = (float)(windowHeight) - bgHeight;  // 屏幕底部
+    float barY = (float)(windowHeight) - bgHeight;  // Screen bottom
 
     // Colors: 300g=White, 300=Blue, 200=Green, 100/50=Yellow, Miss=Red
     SDL_Color color300g = {255, 0, 127, 255};   // Rose - Marvelous
@@ -1771,35 +1858,53 @@ void Renderer::renderHitErrorBar(const std::vector<HitError>& errors, int64_t cu
     float centerX = barX + halfWidth;
     float zoneY = barY + (bgHeight - barHeight) / 2.0f;  // 居中显示区域
 
-    // Draw window zones from outside to inside
-    // Miss zone (red)
-    SDL_SetRenderDrawColor(renderer, colorMiss.r, colorMiss.g, colorMiss.b, 128);
-    SDL_FRect missZone = { barX, zoneY, barWidth, barHeight };
-    SDL_RenderFillRect(renderer, &missZone);
+    // Draw window zones from outside to inside (only if enabled)
+    // Miss zone (red) - enabled[5]
+    if (!enabled || enabled[5]) {
+        SDL_SetRenderDrawColor(renderer, colorMiss.r, colorMiss.g, colorMiss.b, 128);
+        SDL_FRect missZone = { barX, zoneY, barWidth, barHeight };
+        SDL_RenderFillRect(renderer, &missZone);
+    }
 
-    // 100/50 zone (yellow)
-    float zone100Width = (float)window100 / (float)windowMiss * halfWidth;
-    SDL_SetRenderDrawColor(renderer, color100.r, color100.g, color100.b, 128);
-    SDL_FRect zone100 = { centerX - zone100Width, zoneY, zone100Width * 2.0f, barHeight };
-    SDL_RenderFillRect(renderer, &zone100);
+    // 50 zone (yellow) - enabled[4]
+    if (!enabled || enabled[4]) {
+        float zone50Width = (float)window50 / (float)windowMiss * halfWidth;
+        SDL_SetRenderDrawColor(renderer, color100.r, color100.g, color100.b, 128);
+        SDL_FRect zone50 = { centerX - zone50Width, zoneY, zone50Width * 2.0f, barHeight };
+        SDL_RenderFillRect(renderer, &zone50);
+    }
 
-    // 200 zone (green)
-    float zone200Width = (float)window200 / (float)windowMiss * halfWidth;
-    SDL_SetRenderDrawColor(renderer, color200.r, color200.g, color200.b, 128);
-    SDL_FRect zone200 = { centerX - zone200Width, zoneY, zone200Width * 2.0f, barHeight };
-    SDL_RenderFillRect(renderer, &zone200);
+    // 100 zone (yellow) - enabled[3]
+    if (!enabled || enabled[3]) {
+        float zone100Width = (float)window100 / (float)windowMiss * halfWidth;
+        SDL_SetRenderDrawColor(renderer, color100.r, color100.g, color100.b, 128);
+        SDL_FRect zone100 = { centerX - zone100Width, zoneY, zone100Width * 2.0f, barHeight };
+        SDL_RenderFillRect(renderer, &zone100);
+    }
 
-    // 300 zone (blue)
-    float zone300Width = (float)window300 / (float)windowMiss * halfWidth;
-    SDL_SetRenderDrawColor(renderer, color300.r, color300.g, color300.b, 128);
-    SDL_FRect zone300 = { centerX - zone300Width, zoneY, zone300Width * 2.0f, barHeight };
-    SDL_RenderFillRect(renderer, &zone300);
+    // 200 zone (green) - enabled[2]
+    if (!enabled || enabled[2]) {
+        float zone200Width = (float)window200 / (float)windowMiss * halfWidth;
+        SDL_SetRenderDrawColor(renderer, color200.r, color200.g, color200.b, 128);
+        SDL_FRect zone200 = { centerX - zone200Width, zoneY, zone200Width * 2.0f, barHeight };
+        SDL_RenderFillRect(renderer, &zone200);
+    }
 
-    // 300g zone (rose)
-    float zone300gWidth = (float)window300g / (float)windowMiss * halfWidth;
-    SDL_SetRenderDrawColor(renderer, color300g.r, color300g.g, color300g.b, 128);
-    SDL_FRect zone300g = { centerX - zone300gWidth, zoneY, zone300gWidth * 2.0f, barHeight };
-    SDL_RenderFillRect(renderer, &zone300g);
+    // 300 zone (blue) - enabled[1]
+    if (!enabled || enabled[1]) {
+        float zone300Width = (float)window300 / (float)windowMiss * halfWidth;
+        SDL_SetRenderDrawColor(renderer, color300.r, color300.g, color300.b, 128);
+        SDL_FRect zone300 = { centerX - zone300Width, zoneY, zone300Width * 2.0f, barHeight };
+        SDL_RenderFillRect(renderer, &zone300);
+    }
+
+    // 300g zone (rose) - enabled[0]
+    if (!enabled || enabled[0]) {
+        float zone300gWidth = (float)window300g / (float)windowMiss * halfWidth;
+        SDL_SetRenderDrawColor(renderer, color300g.r, color300g.g, color300g.b, 128);
+        SDL_FRect zone300g = { centerX - zone300gWidth, zoneY, zone300gWidth * 2.0f, barHeight };
+        SDL_RenderFillRect(renderer, &zone300g);
+    }
 
     // Draw hit error ticks (additive blend, 40% alpha)
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_ADD);
@@ -1814,16 +1919,18 @@ void Renderer::renderHitErrorBar(const std::vector<HitError>& errors, int64_t cu
         offsetRatio = std::max(-1.0f, std::min(1.0f, offsetRatio));
         float xPos = centerX + offsetRatio * halfWidth;
 
-        // Select color based on offset
+        // Select color based on offset (respecting enabled state)
         int64_t absOff = std::abs(err.offset);
         Uint8 r, g, b;
-        if (absOff <= window300g) {
+        if (absOff <= window300g && (!enabled || enabled[0])) {
             r = color300g.r; g = color300g.g; b = color300g.b;
-        } else if (absOff <= window300) {
+        } else if (absOff <= window300 && (!enabled || enabled[1])) {
             r = color300.r; g = color300.g; b = color300.b;
-        } else if (absOff <= window200) {
+        } else if (absOff <= window200 && (!enabled || enabled[2])) {
             r = color200.r; g = color200.g; b = color200.b;
-        } else if (absOff <= window100) {
+        } else if (absOff <= window100 && (!enabled || enabled[3])) {
+            r = color100.r; g = color100.g; b = color100.b;
+        } else if (absOff <= window50 && (!enabled || enabled[4])) {
             r = color100.r; g = color100.g; b = color100.b;
         } else {
             r = colorMiss.r; g = colorMiss.g; b = colorMiss.b;
@@ -1971,7 +2078,7 @@ void Renderer::renderMenu() {
         SDL_DestroySurface(s);
     }
 
-    const char* version = "Version 0.0.4";
+    const char* version = "Version 0.0.5b";
     s = TTF_RenderText_Blended(font, version, strlen(version), white);
     if (s) {
         SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
@@ -2230,6 +2337,20 @@ void Renderer::renderText(const char* text, float x, float y) {
     if (s) {
         SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
         SDL_FRect dst = {x, y, (float)s->w, (float)s->h};
+        SDL_RenderTexture(renderer, t, nullptr, &dst);
+        SDL_DestroyTexture(t);
+        SDL_DestroySurface(s);
+    }
+}
+
+void Renderer::renderTextRight(const char* text, float rightX, float y) {
+    if (!font) return;
+    SDL_Color white = {255, 255, 255, 255};
+    SDL_Surface* s = TTF_RenderText_Blended(font, text, strlen(text), white);
+    if (s) {
+        SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
+        // Right-align: x = rightX - textWidth
+        SDL_FRect dst = {rightX - (float)s->w, y, (float)s->w, (float)s->h};
         SDL_RenderTexture(renderer, t, nullptr, &dst);
         SDL_DestroyTexture(t);
         SDL_DestroySurface(s);

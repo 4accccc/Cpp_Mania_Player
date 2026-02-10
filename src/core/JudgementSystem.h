@@ -25,6 +25,7 @@ public:
               const JudgementConfig* customWindows, double bpm, double clockRate);
 
     // Get judgement from time difference (absolute value)
+    // When a judgement level is disabled, it will be skipped and fall through to the next level
     Judgement getJudgement(int64_t absDiff) const;
 
     // Get judgement based on overlap percentage (O2Jam style)
@@ -45,6 +46,16 @@ public:
     // Get current mode
     JudgementMode getMode() const { return mode_; }
 
+    // Get enabled state for each judgement level (0=300g, 1=300, 2=200, 3=100, 4=50, 5=miss)
+    bool isEnabled(int index) const { return (index >= 0 && index < 6) ? enabled_[index] : true; }
+    const bool* getEnabledArray() const { return enabled_; }
+
+    // Get the maximum enabled judgement window (for canHit calculation)
+    double getMaxEnabledWindow() const;
+
+    // Adjust judgement based on enabled state (downgrade if disabled)
+    Judgement adjustForEnabled(Judgement j) const;
+
 private:
     // Calculate OD-based windows
     void calcODWindows(float od);
@@ -55,4 +66,5 @@ private:
     JudgementMode mode_;
     JudgementWindows windows_;
     double clockRate_ = 1.0;  // For O2Jam real-time BPM calculation
+    bool enabled_[6] = {true, true, true, true, true, true};  // Enabled state for each judgement level
 };

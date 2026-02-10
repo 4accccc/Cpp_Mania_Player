@@ -442,9 +442,10 @@ void SkinManager::parseManiaSection(const std::string& key, const std::string& v
 
 // Find image file with various extensions
 std::string SkinManager::findImageFile(const std::string& baseName) const {
+    // @2x versions first (high resolution priority)
     static const std::vector<std::string> extensions = {
-        ".png", ".jpg", ".jpeg", ".bmp", ".gif",
-        "@2x.png", "@2x.jpg", "@2x.jpeg"
+        "@2x.png", "@2x.jpg", "@2x.jpeg",
+        ".png", ".jpg", ".jpeg", ".bmp", ".gif"
     };
 
     // First, try beatmap folder if set
@@ -494,13 +495,18 @@ SDL_Texture* SkinManager::loadTexture(const std::string& name) {
     std::string filepath = findImageFile(normalizedName);
     if (filepath.empty()) {
         textureCache[normalizedName] = nullptr;
+        isHighResCache[normalizedName] = false;
         return nullptr;
     }
+
+    // Check if this is a @2x texture
+    bool isHighRes = filepath.find("@2x") != std::string::npos;
 
     int width, height, channels;
     unsigned char* data = stbi_load(filepath.c_str(), &width, &height, &channels, 4);
     if (!data) {
         textureCache[normalizedName] = nullptr;
+        isHighResCache[normalizedName] = false;
         return nullptr;
     }
 
@@ -547,6 +553,7 @@ SDL_Texture* SkinManager::loadTexture(const std::string& name) {
 
     stbi_image_free(data);
     textureCache[normalizedName] = texture;
+    isHighResCache[normalizedName] = isHighRes;
     return texture;
 }
 
@@ -1011,4 +1018,19 @@ bool SkinManager::hasScorebarMarker() const {
     // Check if scorebar-marker exists in skin folder
     std::string path = findImageFile("scorebar-marker");
     return !path.empty();
+}
+
+bool SkinManager::isHighResTexture(SDL_Texture* tex) const {
+    if (!tex) return false;
+    for (const auto& pair : textureCache) {
+        if (pair.second == tex) {
+            auto it = isHighResCache.find(pair.first);
+            return it != isHighResCache.end() && it->second;
+        }
+    }
+    return false;
+}
+
+float SkinManager::getTextureScaleAdjust(SDL_Texture* tex) const {
+    return isHighResTexture(tex) ? 2.0f : 1.0f;
 }

@@ -1,6 +1,9 @@
 #pragma once
 #include <vector>
 #include <string>
+#include <thread>
+#include <atomic>
+#include <mutex>
 #include "Note.h"
 #include "OsuParser.h"
 #include "BMSParser.h"
@@ -36,16 +39,32 @@ enum class GameState {
     Paused,
     Dead,
     Result,
-    ReplayFactory
+    ReplayFactory,
+    Loading  // Async beatmap loading state
+};
+
+// Beatmap loading state
+enum class LoadingState {
+    Idle,
+    Parsing,        // Parsing chart file
+    ExtractingAudio,// Extracting audio (MUSYNX ACB, etc.)
+    LoadingAudio,   // Loading music file
+    LoadingKeysounds,// Loading keysounds
+    LoadingAssets,  // Loading storyboard, textures
+    Completed,
+    Failed,
+    Cancelled
 };
 
 // Beatmap source type
 enum class BeatmapSource {
     Osu,
-    DJMax,
+    DJMaxRespect,  // DJMAX RESPECT (.bytes files)
+    DJMaxOnline,   // DJMAX Online (.pt files)
     O2Jam,
     BMS,
-    Malody
+    Malody,
+    MuSynx
 };
 
 // Difficulty info for song select
@@ -85,7 +104,8 @@ public:
 private:
     bool loadBeatmap(const std::string& path);
     void resetGame();
-    void cleanupTempDir();  // Clean up temporary files after song ends
+    void cleanupTempDir();  // Clean up BGA textures when switching songs
+    void cleanupTempFiles();  // Clean up temp files (startup/exit only)
     void updateBga(int64_t currentTime);  // Update BGA state
     void renderBga();  // Render BGA layers
     void saveConfig();
@@ -292,6 +312,21 @@ private:
     bool editingVideoFPS = false;
     std::string videoFPSInput = "60";
     bool videoShowHolding = false;
+
+    // Async Beatmap Loading
+    std::thread loadingThread;
+    std::atomic<LoadingState> loadingState{LoadingState::Idle};
+    std::atomic<float> loadingProgress{0.0f};
+    std::atomic<bool> loadingCancelled{false};
+    std::string loadingStatusText;
+    std::mutex loadingMutex;
+    std::string pendingBeatmapPath;
+    GameState stateBeforeLoading = GameState::SongSelect;
+    bool pendingReplayMode = false;  // True if loading for replay playback
+
+    void startAsyncLoad(const std::string& path, bool isReplayMode = false);
+    void loadBeatmapAsync(const std::string& path);
+    void cancelLoading();
 
     // Debug logging
     std::vector<DebugLogEntry> debugLog;

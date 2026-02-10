@@ -122,8 +122,14 @@ private:
     // Texture cache
     mutable std::map<std::string, SDL_Texture*> textureCache;
     mutable std::map<std::string, std::vector<SDL_Texture*>> frameCache;  // Multi-frame texture cache
+    mutable std::map<std::string, bool> isHighResCache;  // Track if texture is @2x
 
     // Note texture result cache (to avoid repeated file system operations)
     mutable std::map<std::string, std::vector<SDL_Texture*>> noteHeadCache;
     mutable std::map<std::string, std::vector<SDL_Texture*>> noteTailCache;
+
+public:
+    // Check if a texture is @2x (high resolution)
+    bool isHighResTexture(SDL_Texture* tex) const;
+    float getTextureScaleAdjust(SDL_Texture* tex) const;
 };

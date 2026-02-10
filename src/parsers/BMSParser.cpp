@@ -195,8 +195,12 @@ bool BMSParser::parseFull(const std::string& filepath, BMSData& data) {
         // Header fields
         if (line.rfind("#TITLE ", 0) == 0 || line.rfind("#TITLE\t", 0) == 0) {
             info.title = trim(line.substr(7));
+        } else if (line.rfind("#SUBTITLE ", 0) == 0 || line.rfind("#SUBTITLE\t", 0) == 0) {
+            info.version = trim(line.substr(10));  // Use subtitle as difficulty name
         } else if (line.rfind("#ARTIST ", 0) == 0 || line.rfind("#ARTIST\t", 0) == 0) {
             info.artist = trim(line.substr(8));
+        } else if (line.rfind("#SUBARTIST ", 0) == 0 || line.rfind("#SUBARTIST\t", 0) == 0) {
+            info.creator = trim(line.substr(11));  // Use subartist as charter
         } else if (line.rfind("#BPM ", 0) == 0 && line.find(':') == std::string::npos) {
             baseBpm = std::stod(trim(line.substr(5)));
         } else if (line.rfind("#PLAYLEVEL ", 0) == 0) {
@@ -345,6 +349,51 @@ bool BMSParser::parseFull(const std::string& filepath, BMSData& data) {
         double posB = b.measure + static_cast<double>(b.position) / b.total;
         return posA < posB;
     });
+
+    // Generate TimingPoints for BPM changes (for scroll speed)
+    {
+        double time = 0.0;
+        double bpm = baseBpm;
+        double lastPos = 0.0;
+
+        for (const auto& evt : bpmEvents) {
+            if (evt.isStop) continue;  // Skip STOP events for TimingPoints
+
+            double evtPos = evt.measure + static_cast<double>(evt.position) / evt.total;
+
+            // Calculate time at this BPM change
+            int startMeasure = static_cast<int>(lastPos);
+            int endMeasure = static_cast<int>(evtPos);
+            double fracStart = lastPos - startMeasure;
+            double fracEnd = evtPos - endMeasure;
+
+            if (startMeasure == endMeasure) {
+                double ml = measureLengths.count(startMeasure) ? measureLengths[startMeasure] : 1.0;
+                time += (fracEnd - fracStart) * ml * 4.0 * 60000.0 / bpm;
+            } else {
+                double ml = measureLengths.count(startMeasure) ? measureLengths[startMeasure] : 1.0;
+                time += (1.0 - fracStart) * ml * 4.0 * 60000.0 / bpm;
+                for (int m = startMeasure + 1; m < endMeasure; m++) {
+                    ml = measureLengths.count(m) ? measureLengths[m] : 1.0;
+                    time += ml * 4.0 * 60000.0 / bpm;
+                }
+                ml = measureLengths.count(endMeasure) ? measureLengths[endMeasure] : 1.0;
+                time += fracEnd * ml * 4.0 * 60000.0 / bpm;
+            }
+
+            // Add TimingPoint for this BPM change
+            TimingPoint tp;
+            tp.time = time;
+            tp.beatLength = 60000.0 / evt.bpm;
+            tp.uninherited = true;
+            tp.effectiveBeatLength = tp.beatLength;
+            tp.volume = 100;
+            info.timingPoints.push_back(tp);
+
+            bpm = evt.bpm;
+            lastPos = evtPos;
+        }
+    }
 
     // Time calculation helper function
     auto calculateTime = [&](int measure, int position, int total) -> double {
@@ -526,6 +575,11 @@ bool BMSParser::parseFull(const std::string& filepath, BMSData& data) {
     info.endTimeObjectCount = 0;
     for (const auto& note : info.notes) {
         if (note.isHold) info.endTimeObjectCount++;
+    }
+
+    // Fallback: if no SUBARTIST, use ARTIST as creator
+    if (info.creator.empty()) {
+        info.creator = info.artist;
     }
 
     std::cout << "Loaded BMS: " << info.title << " by " << info.artist << std::endl;
