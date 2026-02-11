@@ -15,7 +15,9 @@
 #include "StarRating.h"
 #include "SongIndex.h"
 #include "OsuMods.h"
+#include "FileDialog.h"
 #include "stb_image.h"
+#include "stb_image_write.h"
 #include <SDL3/SDL.h>
 #include <iostream>
 #include <fstream>
@@ -207,7 +209,7 @@ Game::Game() : state(GameState::Menu), running(false), musicStarted(false), hasB
                songSelectDragging(false), songSelectDragStartY(0), songSelectDragStartScroll(0.0f), currentBgTexture(nullptr),
                songSelectTransition(false), songSelectTransitionStart(0),
                previewFading(false), previewFadeIn(true), previewFadeStart(0),
-               previewFadeDuration(200), previewTargetIndex(-1),
+               previewFadeDuration(200), previewTargetIndex(-1), previewTargetDiffIndex(-1),
                hasBga(false), currentBgaEntry(0) {
     for (int i = 0; i < 6; i++) {
         judgementCounts[i] = 0;
@@ -220,19 +222,32 @@ Game::Game() : state(GameState::Menu), running(false), musicStarted(false), hasB
 }
 
 Game::~Game() {
+    // Wait for background load thread to finish
+    if (bgLoadThread.joinable()) {
+        bgLoadThread.join();
+    }
+    if (bgLoadData) {
+        stbi_image_free(bgLoadData);
+        bgLoadData = nullptr;
+    }
     cleanupTempFiles();  // Clean up temp files on exit
     TTF_Quit();
     SDL_Quit();
 }
 
 bool Game::init() {
-#ifdef _WIN32
-    // Prevent multiple instances using a named mutex
-    HANDLE hMutex = CreateMutexA(NULL, TRUE, "ManiaPlayerSingleInstance");
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        CloseHandle(hMutex);
-        return false;  // Another instance is already running
+    // Prevent multiple instances using lock file
+    std::string lockPath = "Data/.lock";
+    fs::create_directories("Data");
+    lockFile.open(lockPath, std::ios::out);
+    if (!lockFile.is_open()) {
+        return false;  // Another instance may be running
     }
+#ifdef _WIN32
+    // On Windows, opening the file is enough - it will fail if another process has it open
+    // But we need to keep the file open for the duration of the program
+#else
+    // On Unix, use flock (would need additional implementation)
 #endif
 
     // Clean up temp files from previous session
@@ -290,102 +305,43 @@ bool Game::init() {
 }
 
 std::string Game::openFileDialog() {
-#ifdef _WIN32
-    char filename[MAX_PATH] = "";
-    OPENFILENAMEA ofn = {};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = NULL;
-    ofn.lpstrFilter = "Beatmap Files (*.osu;*.bytes;*.ojn;*.pt;*.bms;*.bme;*.bml;*.pms)\0*.osu;*.bytes;*.ojn;*.pt;*.bms;*.bme;*.bml;*.pms\0osu! Beatmap (*.osu)\0*.osu\0DJMAX Chart (*.bytes)\0*.bytes\0O2Jam Chart (*.ojn)\0*.ojn\0DJMax Online (*.pt)\0*.pt\0BMS Chart (*.bms;*.bme;*.bml;*.pms)\0*.bms;*.bme;*.bml;*.pms\0All Files\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-    if (GetOpenFileNameA(&ofn)) {
-        return std::string(filename);
-    }
-#endif
-    return "";
+    return FileDialog::openFile(
+        "Select Beatmap",
+        nullptr,
+        {"*.osu", "*.bytes", "*.ojn", "*.pt", "*.bms", "*.bme", "*.bml", "*.pms", "*.1", "*.mc", "*.txt"},
+        "Beatmap Files"
+    );
 }
 
 std::string Game::openReplayDialog() {
-#ifdef _WIN32
-    wchar_t filename[MAX_PATH] = L"";
-    OPENFILENAMEW ofn = {};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = NULL;
-    ofn.lpstrFilter = L"osu! Replay (*.osr)\0*.osr\0All Files\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-    if (GetOpenFileNameW(&ofn)) {
-        // Convert wchar_t to UTF-8
-        int size = WideCharToMultiByte(CP_UTF8, 0, filename, -1, nullptr, 0, nullptr, nullptr);
-        std::string result(size - 1, 0);
-        WideCharToMultiByte(CP_UTF8, 0, filename, -1, &result[0], size, nullptr, nullptr);
-        return result;
-    }
-#endif
-    return "";
+    return FileDialog::openFile(
+        "Select Replay",
+        nullptr,
+        {"*.osr"},
+        "osu! Replay"
+    );
 }
 
 std::string Game::saveReplayDialog() {
-#ifdef _WIN32
-    wchar_t filename[MAX_PATH] = L"replay.osr";
-    OPENFILENAMEW ofn = {};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = NULL;
-    ofn.lpstrFilter = L"osu! Replay (*.osr)\0*.osr\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
-    ofn.lpstrDefExt = L"osr";
-    if (GetSaveFileNameW(&ofn)) {
-        // Convert wchar_t to UTF-8
-        int size = WideCharToMultiByte(CP_UTF8, 0, filename, -1, nullptr, 0, nullptr, nullptr);
-        std::string result(size - 1, 0);
-        WideCharToMultiByte(CP_UTF8, 0, filename, -1, &result[0], size, nullptr, nullptr);
-        return result;
-    }
-#endif
-    return "";
+    return FileDialog::saveFile(
+        "Save Replay",
+        "replay.osr",
+        {"*.osr"},
+        "osu! Replay"
+    );
 }
 
 std::string Game::saveImageDialog() {
-#ifdef _WIN32
-    wchar_t filename[MAX_PATH] = L"analysis.png";
-    OPENFILENAMEW ofn = {};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = NULL;
-    ofn.lpstrFilter = L"PNG Image (*.png)\0*.png\0All Files\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = L"png";
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
-    if (GetSaveFileNameW(&ofn)) {
-        int size = WideCharToMultiByte(CP_UTF8, 0, filename, -1, nullptr, 0, nullptr, nullptr);
-        std::string result(size - 1, 0);
-        WideCharToMultiByte(CP_UTF8, 0, filename, -1, &result[0], size, nullptr, nullptr);
-        return result;
-    }
-#endif
-    return "";
+    return FileDialog::saveFile(
+        "Save Image",
+        "analysis.png",
+        {"*.png"},
+        "PNG Image"
+    );
 }
 
 std::string Game::openSkinFolderDialog() {
-#ifdef _WIN32
-    BROWSEINFOA bi = {};
-    bi.lpszTitle = "Select Skin Folder";
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    LPITEMIDLIST pidl = SHBrowseForFolderA(&bi);
-    if (pidl) {
-        char path[MAX_PATH];
-        if (SHGetPathFromIDListA(pidl, path)) {
-            CoTaskMemFree(pidl);
-            return std::string(path);
-        }
-        CoTaskMemFree(pidl);
-    }
-#endif
-    return "";
+    return FileDialog::selectFolder("Select Skin Folder");
 }
 
 void Game::saveConfig() {
@@ -1340,14 +1296,6 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
             storyboard.loadFromOsb(osbPath);
         }
 
-        // For O2Jam: set background from extracted cover image
-        if (isOjn && !storyboard.hasBackground()) {
-            std::string coverPath = OjnParser::extractCover(actualPath);
-            if (!coverPath.empty()) {
-                storyboard.setBackgroundImage(coverPath);
-            }
-        }
-
         storyboard.loadTextures(renderer.getRenderer());
     }
 
@@ -2145,13 +2093,15 @@ void Game::handleInput() {
                     if (selectedDifficultyIndex > 0) {
                         // Move up within difficulty list
                         selectedDifficultyIndex--;
+                        loadSongBackground(selectedSongIndex, selectedDifficultyIndex);
+                        playPreviewMusic(selectedSongIndex, selectedDifficultyIndex);
                         songSelectNeedAutoScroll = true;
                     } else if (selectedSongIndex > 0) {
                         // Move to previous song
                         selectedSongIndex--;
                         selectedDifficultyIndex = 0;
-                        loadSongBackground(selectedSongIndex);
-                        playPreviewMusic(selectedSongIndex);
+                        loadSongBackground(selectedSongIndex, selectedDifficultyIndex);
+                        playPreviewMusic(selectedSongIndex, selectedDifficultyIndex);
                         songSelectNeedAutoScroll = true;
                     }
                 }
@@ -2160,13 +2110,15 @@ void Game::handleInput() {
                     if (selectedDifficultyIndex < numDifficulties - 1) {
                         // Move down within difficulty list
                         selectedDifficultyIndex++;
+                        loadSongBackground(selectedSongIndex, selectedDifficultyIndex);
+                        playPreviewMusic(selectedSongIndex, selectedDifficultyIndex);
                         songSelectNeedAutoScroll = true;
                     } else if (selectedSongIndex < (int)songList.size() - 1) {
                         // Move to next song
                         selectedSongIndex++;
                         selectedDifficultyIndex = 0;
-                        loadSongBackground(selectedSongIndex);
-                        playPreviewMusic(selectedSongIndex);
+                        loadSongBackground(selectedSongIndex, selectedDifficultyIndex);
+                        playPreviewMusic(selectedSongIndex, selectedDifficultyIndex);
                         songSelectNeedAutoScroll = true;
                     }
                 }
@@ -2175,9 +2127,10 @@ void Game::handleInput() {
                         std::string path = songList[selectedSongIndex].beatmapFiles[selectedDifficultyIndex];
                         std::cout << "[SONG SELECT DEBUG] selectedDifficultyIndex=" << selectedDifficultyIndex
                                   << ", difficulties.size()=" << songList[selectedSongIndex].difficulties.size() << std::endl;
-                        // Set version for IIDX (all difficulties in same .1 file)
+                        // Set version and hash for replay export
                         if (selectedDifficultyIndex < (int)songList[selectedSongIndex].difficulties.size()) {
                             beatmap.version = songList[selectedSongIndex].difficulties[selectedDifficultyIndex].version;
+                            beatmap.beatmapHash = songList[selectedSongIndex].difficulties[selectedDifficultyIndex].hash;
                             std::cout << "[SONG SELECT DEBUG] Set beatmap.version = '" << beatmap.version << "'" << std::endl;
                         }
                         stopPreviewMusic();
@@ -2196,8 +2149,8 @@ void Game::handleInput() {
                     selectedDifficultyIndex = 0;
                     songSelectScroll = 0.0f;
                     if (!songList.empty()) {
-                        loadSongBackground(0);
-                        playPreviewMusic(0);
+                        loadSongBackground(0, 0);
+                        playPreviewMusic(0, 0);
                     }
                 }
             }
@@ -2300,17 +2253,19 @@ void Game::handleInput() {
                         std::cout << "Parsed " << parsed << " values: " << year << "/" << month << "/" << day
                                   << " " << hour << ":" << min << ":" << sec << std::endl;
                         if (parsed == 6 && year >= 1601 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-                            SYSTEMTIME st = {0};
-                            st.wYear = (WORD)year; st.wMonth = (WORD)month; st.wDay = (WORD)day;
-                            st.wHour = (WORD)hour; st.wMinute = (WORD)min; st.wSecond = (WORD)sec;
-                            FILETIME ftLocal, ftUtc;
-                            if (SystemTimeToFileTime(&st, &ftLocal)) {
-                                LocalFileTimeToFileTime(&ftLocal, &ftUtc);
-                                int64_t fileTimeTicks = ((int64_t)ftUtc.dwHighDateTime << 32) | ftUtc.dwLowDateTime;
-                                factoryReplayInfo.timestamp = fileTimeTicks + 504911232000000000LL;
-                            } else {
-                                std::cout << "SystemTimeToFileTime failed!" << std::endl;
-                            }
+                            // Cross-platform: convert to Windows FILETIME ticks
+                            std::tm tm = {};
+                            tm.tm_year = year - 1900;
+                            tm.tm_mon = month - 1;
+                            tm.tm_mday = day;
+                            tm.tm_hour = hour;
+                            tm.tm_min = min;
+                            tm.tm_sec = sec;
+                            time_t unixTime = std::mktime(&tm);
+                            // Convert Unix time to Windows FILETIME (100-ns intervals since 1601)
+                            const int64_t FILETIME_UNIX_DIFF = 116444736000000000LL;
+                            int64_t fileTimeTicks = (int64_t)unixTime * 10000000LL + FILETIME_UNIX_DIFF;
+                            factoryReplayInfo.timestamp = fileTimeTicks + 504911232000000000LL;
                         }
                     }
                     if (editingJudgements) {
@@ -2396,8 +2351,8 @@ void Game::handleInput() {
                             state = GameState::SongSelect;
                             renderer.setWindowTitle("Mania Player");
                             if (!songList.empty()) {
-                                loadSongBackground(selectedSongIndex);
-                                playPreviewMusic(selectedSongIndex);
+                                loadSongBackground(selectedSongIndex, selectedDifficultyIndex);
+                                playPreviewMusic(selectedSongIndex, selectedDifficultyIndex);
                             }
                         }
                         break;
@@ -2455,8 +2410,8 @@ void Game::handleInput() {
                             state = GameState::SongSelect;
                             renderer.setWindowTitle("Mania Player");
                             if (!songList.empty()) {
-                                loadSongBackground(selectedSongIndex);
-                                playPreviewMusic(selectedSongIndex);
+                                loadSongBackground(selectedSongIndex, selectedDifficultyIndex);
+                                playPreviewMusic(selectedSongIndex, selectedDifficultyIndex);
                             }
                         }
                         break;
@@ -2901,6 +2856,8 @@ void Game::updateReplay() {
 void Game::render() {
     // Update preview fade (works in all states)
     updatePreviewFade();
+    // Update async background load
+    updateBackgroundLoad();
 
     frameCount++;
     int64_t now = SDL_GetTicks();
@@ -2924,10 +2881,11 @@ void Game::render() {
                 replayMode = false;
                 scanSongsFolder();  // Incremental scan for new/removed songs
                 selectedSongIndex = 0;
+                selectedDifficultyIndex = 0;
                 songSelectScroll = 0.0f;
                 if (!songList.empty()) {
-                    loadSongBackground(0);
-                    playPreviewMusic(0);
+                    loadSongBackground(0, 0);
+                    playPreviewMusic(0, 0);
                 }
                 state = GameState::SongSelect;
             }
@@ -3070,17 +3028,18 @@ void Game::render() {
                         if (isSelected && selectedDifficultyIndex == 0) {
                             // Double click on selected song - confirm first difficulty
                             std::string path = song.beatmapFiles[0];
-                            // Set version for IIDX
+                            // Set version and hash for replay export
                             if (!song.difficulties.empty()) {
                                 beatmap.version = song.difficulties[0].version;
+                                beatmap.beatmapHash = song.difficulties[0].hash;
                             }
                             stopPreviewMusic();
                             startAsyncLoad(path);
                         } else {
                             selectedSongIndex = i;
                             selectedDifficultyIndex = 0;
-                            loadSongBackground(i);
-                            playPreviewMusic(i);
+                            loadSongBackground(i, 0);
+                            playPreviewMusic(i, 0);
                         }
                     }
                 }
@@ -3125,14 +3084,17 @@ void Game::render() {
                                 if (selectedDifficultyIndex == d) {
                                     // Double click - confirm
                                     std::string path = song.beatmapFiles[d];
-                                    // Set version for IIDX
+                                    // Set version and hash for replay export
                                     if (d < (int)song.difficulties.size()) {
                                         beatmap.version = song.difficulties[d].version;
+                                        beatmap.beatmapHash = song.difficulties[d].hash;
                                     }
                                     stopPreviewMusic();
                                     startAsyncLoad(path);
                                 } else {
                                     selectedDifficultyIndex = d;
+                                    loadSongBackground(selectedSongIndex, d);
+                                    playPreviewMusic(selectedSongIndex, d);
                                 }
                             }
                         }
@@ -3456,16 +3418,15 @@ void Game::render() {
             // Offset: 504911232000000000 ticks (1600 years)
             int64_t fileTimeTicks = factoryReplayInfo.timestamp - 504911232000000000LL;
             if (fileTimeTicks > 0) {
-                FILETIME ftUtc, ftLocal;
-                ftUtc.dwLowDateTime = (DWORD)(fileTimeTicks & 0xFFFFFFFF);
-                ftUtc.dwHighDateTime = (DWORD)(fileTimeTicks >> 32);
-                // Convert UTC to local time
-                FileTimeToLocalFileTime(&ftUtc, &ftLocal);
-                SYSTEMTIME st;
-                if (FileTimeToSystemTime(&ftLocal, &st)) {
+                // Cross-platform: convert FILETIME to local time
+                const int64_t FILETIME_UNIX_DIFF = 116444736000000000LL;
+                time_t unixTime = (fileTimeTicks - FILETIME_UNIX_DIFF) / 10000000LL;
+                std::tm* tm = std::localtime(&unixTime);
+                if (tm) {
                     char buf[64];
                     snprintf(buf, sizeof(buf), "%04d/%02d/%02d %02d:%02d:%02d",
-                             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+                             tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                             tm->tm_hour, tm->tm_min, tm->tm_sec);
                     factoryTimestampStr = buf;
                 } else {
                     factoryTimestampStr = "Invalid timestamp";
@@ -3548,17 +3509,118 @@ void Game::render() {
         renderer.renderLabel("Repair", analyzeX, repairY);
 
         // Fix Beatmap Hash button
-        if (!analysisBlockClick && renderer.renderButton("Fix Beatmap Hash", analyzeX, repairY + 30, analyzeBtnW, analyzeBtnH, mouseX, mouseY, mouseClicked)) {
+        if (!analysisBlockClick && !factoryFixHashPending && renderer.renderButton("Fix Beatmap Hash", analyzeX, repairY + 30, analyzeBtnW, analyzeBtnH, mouseX, mouseY, mouseClicked)) {
             if (!factoryReplayPath.empty()) {
                 // Open file dialog to select correct beatmap
                 std::string beatmapPath = openFileDialog();
                 if (!beatmapPath.empty()) {
-                    // Calculate new hash
-                    std::string newHash = OsuParser::calculateMD5(beatmapPath);
-                    if (!newHash.empty()) {
-                        // Update replay info
-                        factoryReplayInfo.beatmapHash = newHash;
+                    // Calculate new hash based on file type
+                    std::string ext = beatmapPath.substr(beatmapPath.find_last_of('.'));
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+                    if (ext == ".ojn") {
+                        // O2Jam: need difficulty selection
+                        factoryFixHashPending = true;
+                        factoryFixHashPath = beatmapPath;
+                        factoryFixHashType = 1;  // O2Jam
+                    } else if (ext == ".1") {
+                        // IIDX: need difficulty selection
+                        factoryFixHashPending = true;
+                        factoryFixHashPath = beatmapPath;
+                        factoryFixHashType = 2;  // IIDX
+                    } else {
+                        // All other formats: just use file MD5
+                        std::string newHash = OsuParser::calculateMD5(beatmapPath);
+                        if (!newHash.empty()) {
+                            factoryReplayInfo.beatmapHash = newHash;
+                        }
                     }
+                }
+            }
+        }
+
+        // Difficulty selection popup for Fix Hash
+        if (factoryFixHashPending) {
+            int winW, winH;
+            SDL_GetWindowSize(renderer.getWindow(), &winW, &winH);
+
+            // Draw semi-transparent overlay
+            SDL_SetRenderDrawBlendMode(renderer.getRenderer(), SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(renderer.getRenderer(), 0, 0, 0, 180);
+            SDL_FRect overlay = {0, 0, (float)winW, (float)winH};
+            SDL_RenderFillRect(renderer.getRenderer(), &overlay);
+
+            // Popup box size depends on type
+            float popupW = (factoryFixHashType == 2) ? 340 : 300;
+            float popupH = (factoryFixHashType == 2) ? 320 : 220;
+            float popupX = (winW - popupW) / 2 + 30;
+            float popupY = (winH - popupH) / 2;
+            SDL_SetRenderDrawColor(renderer.getRenderer(), 40, 40, 40, 255);
+            SDL_FRect popupBg = {popupX, popupY, popupW, popupH};
+            SDL_RenderFillRect(renderer.getRenderer(), &popupBg);
+
+            // Title
+            renderer.renderLabel("Select Difficulty", popupX + 20, popupY + 10);
+
+            if (factoryFixHashType == 1) {
+                // O2Jam: Easy, Normal, Hard
+                float btnW = 120, btnH = 30;
+                float btnX = popupX + (popupW - btnW) / 2;
+                float btnY = popupY + 50;
+                if (renderer.renderButton("Easy", btnX, btnY, btnW, btnH, mouseX, mouseY, mouseClicked)) {
+                    std::string newHash = OsuParser::calculateMD5(factoryFixHashPath) + ":0";
+                    factoryReplayInfo.beatmapHash = newHash;
+                    factoryFixHashPending = false;
+                }
+                if (renderer.renderButton("Normal", btnX, btnY + 40, btnW, btnH, mouseX, mouseY, mouseClicked)) {
+                    std::string newHash = OsuParser::calculateMD5(factoryFixHashPath) + ":1";
+                    factoryReplayInfo.beatmapHash = newHash;
+                    factoryFixHashPending = false;
+                }
+                if (renderer.renderButton("Hard", btnX, btnY + 80, btnW, btnH, mouseX, mouseY, mouseClicked)) {
+                    std::string newHash = OsuParser::calculateMD5(factoryFixHashPath) + ":2";
+                    factoryReplayInfo.beatmapHash = newHash;
+                    factoryFixHashPending = false;
+                }
+                // Cancel button
+                if (renderer.renderButton("Cancel", btnX, popupY + popupH - 45, btnW, btnH, mouseX, mouseY, mouseClicked)) {
+                    factoryFixHashPending = false;
+                }
+            } else if (factoryFixHashType == 2) {
+                // IIDX: SP and DP columns
+                float btnW = 130, btnH = 28;
+                float colSpacing = 20;
+                float spX = popupX + colSpacing;
+                float dpX = popupX + popupW / 2 + colSpacing / 2;
+                float btnY = popupY + 50;
+
+                // SP column
+                renderer.renderLabel("SP", spX + btnW / 2 - 10, btnY - 25);
+                const char* spDiffs[] = {"NORMAL", "HYPER", "ANOTHER", "LEGGENDARIA"};
+                int spIndices[] = {1, 2, 3, 4};
+                for (int i = 0; i < 4; i++) {
+                    if (renderer.renderButton(spDiffs[i], spX, btnY + i * 38, btnW, btnH, mouseX, mouseY, mouseClicked)) {
+                        std::string newHash = OsuParser::calculateMD5(factoryFixHashPath) + ":" + std::to_string(spIndices[i]);
+                        factoryReplayInfo.beatmapHash = newHash;
+                        factoryFixHashPending = false;
+                    }
+                }
+
+                // DP column
+                renderer.renderLabel("DP", dpX + btnW / 2 - 10, btnY - 25);
+                int dpIndices[] = {6, 7, 8, 9};
+                for (int i = 0; i < 4; i++) {
+                    if (renderer.renderButton(spDiffs[i], dpX, btnY + i * 38, btnW, btnH, mouseX, mouseY, mouseClicked)) {
+                        std::string newHash = OsuParser::calculateMD5(factoryFixHashPath) + ":" + std::to_string(dpIndices[i]);
+                        factoryReplayInfo.beatmapHash = newHash;
+                        factoryFixHashPending = false;
+                    }
+                }
+
+                // Cancel button
+                float cancelX = popupX + (popupW - btnW) / 2;
+                if (renderer.renderButton("Cancel", cancelX, popupY + popupH - 45, btnW, btnH, mouseX, mouseY, mouseClicked)) {
+                    factoryFixHashPending = false;
                 }
             }
         }
@@ -3591,9 +3653,50 @@ void Game::render() {
                 }
 
                 if (!beatmapPath.empty()) {
-                    // Parse beatmap
+                    // Parse beatmap based on file type
                     BeatmapInfo videoBeatmap;
-                    if (OsuParser::parse(beatmapPath, videoBeatmap)) {
+                    bool parseSuccess = false;
+                    std::string ext = beatmapPath.substr(beatmapPath.find_last_of('.'));
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+                    // Handle O2Jam path format (path:difficulty:level)
+                    std::string actualPath = beatmapPath;
+                    int ojnDifficulty = 2;  // Default Hard
+                    if (beatmapPath.find(".ojn:") != std::string::npos) {
+                        size_t colonPos = beatmapPath.find(".ojn:");
+                        actualPath = beatmapPath.substr(0, colonPos + 4);
+                        std::string suffix = beatmapPath.substr(colonPos + 5);
+                        ojnDifficulty = std::stoi(suffix.substr(0, 1));
+                        ext = ".ojn";
+                    }
+
+                    // Handle IIDX path format (path:diffIdx)
+                    int iidxDiffIdx = 3;  // Default SP ANOTHER
+                    if (ext == ".1" && beatmapPath.find(":") != std::string::npos) {
+                        size_t colonPos = beatmapPath.find_last_of(':');
+                        actualPath = beatmapPath.substr(0, colonPos);
+                        iidxDiffIdx = std::stoi(beatmapPath.substr(colonPos + 1));
+                    }
+
+                    if (ext == ".osu") {
+                        parseSuccess = OsuParser::parse(actualPath, videoBeatmap);
+                    } else if (ext == ".ojn") {
+                        parseSuccess = OjnParser::parse(actualPath, videoBeatmap, static_cast<OjnDifficulty>(ojnDifficulty));
+                    } else if (ext == ".pt") {
+                        parseSuccess = PTParser::parse(actualPath, videoBeatmap);
+                    } else if (ext == ".bytes") {
+                        parseSuccess = DJMaxParser::parse(actualPath, videoBeatmap);
+                    } else if (ext == ".bms" || ext == ".bme" || ext == ".bml" || ext == ".pms") {
+                        parseSuccess = BMSParser::parse(actualPath, videoBeatmap);
+                    } else if (ext == ".mc") {
+                        parseSuccess = MalodyParser::parse(actualPath, videoBeatmap);
+                    } else if (ext == ".txt") {
+                        parseSuccess = MuSynxParser::parse(actualPath, videoBeatmap);
+                    } else if (ext == ".1") {
+                        parseSuccess = IIDXParser::parse(actualPath, videoBeatmap, iidxDiffIdx);
+                    }
+
+                    if (parseSuccess) {
                         // Get audio path if not found
                         if (audioPath.empty() && !videoBeatmap.audioFilename.empty()) {
                             size_t lastSlash = beatmapPath.find_last_of("/\\");
@@ -4305,7 +4408,13 @@ void Game::render() {
         }
 
         storyboard.update(currentTime, isPassing);
-        storyboard.renderBackground(renderer.getRenderer());
+        // Use currentBgTexture for O2Jam/DJMAX Online (already loaded in song select)
+        if (!storyboard.hasBackground() && currentBgTexture) {
+            SDL_FRect bgRect = {0, 0, 1280, 720};
+            SDL_RenderTexture(renderer.getRenderer(), currentBgTexture, nullptr, &bgRect);
+        } else {
+            storyboard.renderBackground(renderer.getRenderer());
+        }
 
         // Render BGA if available (DJMAX Online or BMS)
         if (hasBga) {
@@ -5163,6 +5272,9 @@ void Game::scanSongsFolder() {
                     diff.version = cd.version;
                     diff.creator = cd.creator;
                     diff.hash = cd.hash;
+                    diff.backgroundPath = cd.backgroundPath;
+                    diff.audioPath = cd.audioPath;
+                    diff.previewTime = cd.previewTime;
                     diff.keyCount = cd.keyCount;
                     for (int v = 0; v < STAR_RATING_VERSION_COUNT; v++) {
                         diff.starRatings[v] = cd.starRatings[v];
@@ -5214,6 +5326,8 @@ void Game::scanSongsFolder() {
                 DifficultyInfo diff;
                 diff.path = file.path().string();
                 diff.keyCount = 4;  // Default
+                std::string diffBgFile;
+                std::string diffAudioFile;
                 std::ifstream diffFile(file.path().string());
                 std::string diffLine;
                 while (std::getline(diffFile, diffLine)) {
@@ -5229,13 +5343,51 @@ void Game::scanSongsFolder() {
                         std::string val = diffLine.substr(11);
                         while (!val.empty() && val[0] == ' ') val.erase(0, 1);
                         try { diff.keyCount = std::stoi(val); } catch (...) {}
+                    } else if (diffLine.find("AudioFilename:") == 0) {
+                        diffAudioFile = diffLine.substr(14);
+                        while (!diffAudioFile.empty() && (diffAudioFile[0] == ' ' || diffAudioFile[0] == '\t'))
+                            diffAudioFile.erase(0, 1);
+                        while (!diffAudioFile.empty() && (diffAudioFile.back() == '\r' || diffAudioFile.back() == '\n'))
+                            diffAudioFile.pop_back();
+                    } else if (diffLine.find("PreviewTime:") == 0) {
+                        std::string val = diffLine.substr(12);
+                        while (!val.empty() && val[0] == ' ') val.erase(0, 1);
+                        try { diff.previewTime = std::stoi(val); } catch (...) {}
+                    } else if (diffLine.find("[Events]") == 0) {
+                        // Found Events section, look for background
+                        while (std::getline(diffFile, diffLine)) {
+                            if (diffLine.empty() || diffLine[0] == '/' || diffLine[0] == ' ') continue;
+                            if (diffLine[0] == '[') break;  // Next section
+                            // Background line: 0,0,"filename",0,0
+                            if (diffLine.find("0,0,\"") == 0) {
+                                size_t start = diffLine.find("\"") + 1;
+                                size_t end = diffLine.find("\"", start);
+                                if (end != std::string::npos) {
+                                    diffBgFile = diffLine.substr(start, end - start);
+                                    // Skip video files
+                                    std::string bgExt = diffBgFile.substr(diffBgFile.find_last_of(".") + 1);
+                                    std::transform(bgExt.begin(), bgExt.end(), bgExt.begin(), ::tolower);
+                                    if (bgExt == "mp4" || bgExt == "avi" || bgExt == "flv") {
+                                        diffBgFile.clear();
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        break;  // Stop after Events section
                     } else if (diffLine.find("[Editor]") == 0 || diffLine.find("[Metadata]") == 0) {
                         // Continue to next section
                     } else if (diffLine.find("[Difficulty]") == 0) {
                         // Continue reading
-                    } else if (diffLine.find("[Events]") == 0) {
-                        break;  // Stop at Events section
                     }
+                }
+
+                // Set per-difficulty background and audio paths
+                if (!diffBgFile.empty()) {
+                    diff.backgroundPath = song.folderPath + "/" + diffBgFile;
+                }
+                if (!diffAudioFile.empty()) {
+                    diff.audioPath = song.folderPath + "/" + diffAudioFile;
                 }
 
                 // Calculate star ratings for all versions
@@ -5280,6 +5432,7 @@ void Game::scanSongsFolder() {
                 // Calculate star ratings for all versions
                 BeatmapInfo tempInfo;
                 if (DJMaxParser::parse(diff.path, tempInfo)) {
+                    diff.hash = OsuParser::calculateMD5(diff.path);  // Hash for replay matching
                     diff.starRatings[0] = calculateStarRating(tempInfo.notes, diff.keyCount,
                         StarRatingVersion::OsuStable_b20260101);
                     diff.starRatings[1] = calculateStarRating(tempInfo.notes, diff.keyCount,
@@ -5327,6 +5480,7 @@ void Game::scanSongsFolder() {
                     diffEasy.version = "Easy Lv." + std::to_string(header.level[0]);
                     diffEasy.creator = creator;
                     diffEasy.keyCount = 7;
+                    diffEasy.hash = OsuParser::calculateMD5(ojnPath) + ":0";  // Hash for replay matching
                     diffEasy.starRatings[0] = starEasy[0];
                     diffEasy.starRatings[1] = starEasy[1];
 
@@ -5335,6 +5489,7 @@ void Game::scanSongsFolder() {
                     diffNormal.version = "Normal Lv." + std::to_string(header.level[1]);
                     diffNormal.creator = creator;
                     diffNormal.keyCount = 7;
+                    diffNormal.hash = OsuParser::calculateMD5(ojnPath) + ":1";  // Hash for replay matching
                     diffNormal.starRatings[0] = starNormal[0];
                     diffNormal.starRatings[1] = starNormal[1];
 
@@ -5343,6 +5498,7 @@ void Game::scanSongsFolder() {
                     diffHard.version = "Hard Lv." + std::to_string(header.level[2]);
                     diffHard.creator = creator;
                     diffHard.keyCount = 7;
+                    diffHard.hash = OsuParser::calculateMD5(ojnPath) + ":2";  // Hash for replay matching
                     diffHard.starRatings[0] = starHard[0];
                     diffHard.starRatings[1] = starHard[1];
 
@@ -5354,12 +5510,13 @@ void Game::scanSongsFolder() {
                     song.beatmapFiles.push_back(pathHard);
                     song.difficulties.push_back(diffHard);
                 } else {
+                    std::string ojnHash = OsuParser::calculateMD5(ojnPath);
                     std::string p0 = ojnPath + ":0:0";
                     std::string p1 = ojnPath + ":1:0";
                     std::string p2 = ojnPath + ":2:0";
-                    DifficultyInfo d1; d1.path = p0; d1.version = "Easy"; d1.keyCount = 7;
-                    DifficultyInfo d2; d2.path = p1; d2.version = "Normal"; d2.keyCount = 7;
-                    DifficultyInfo d3; d3.path = p2; d3.version = "Hard"; d3.keyCount = 7;
+                    DifficultyInfo d1; d1.path = p0; d1.version = "Easy"; d1.keyCount = 7; d1.hash = ojnHash + ":0";
+                    DifficultyInfo d2; d2.path = p1; d2.version = "Normal"; d2.keyCount = 7; d2.hash = ojnHash + ":1";
+                    DifficultyInfo d3; d3.path = p2; d3.version = "Hard"; d3.keyCount = 7; d3.hash = ojnHash + ":2";
                     song.beatmapFiles.push_back(p0);
                     song.difficulties.push_back(d1);
                     song.beatmapFiles.push_back(p1);
@@ -5423,10 +5580,99 @@ void Game::scanSongsFolder() {
                 BeatmapInfo tempInfo;
                 if (PTParser::parse(diff.path, tempInfo)) {
                     diff.keyCount = tempInfo.keyCount;  // Use detected key count
+                    diff.hash = OsuParser::calculateMD5(diff.path);  // Calculate hash for replay matching
                     diff.starRatings[0] = calculateStarRating(tempInfo.notes, diff.keyCount,
                         StarRatingVersion::OsuStable_b20260101);
                     diff.starRatings[1] = calculateStarRating(tempInfo.notes, diff.keyCount,
                         StarRatingVersion::OsuStable_b20220101);
+                }
+
+                // Set background image path for DJMAX Online
+                // Format: song/{songname}/eyecatch/{songname}_{diff}.jpg or {songname}_ORG_{diff}.jpg
+                {
+                    // Track extracted PAKs - each PAK only extracted once
+                    static std::unordered_map<std::string, bool> extractedPaks;
+
+                    // Extract song name from PT filename (e.g., "baramlive_5kez2.pt" -> "baramlive")
+                    std::string stem = file.path().stem().string();
+                    size_t underscorePos = stem.find('_');
+                    if (underscorePos != std::string::npos) {
+                        std::string songName = stem.substr(0, underscorePos);
+
+                        // Find PAK file
+                        fs::path pakPath = file.path().parent_path() / (songName + ".pak");
+                        std::string pakKey = pakPath.string();
+                        // Use Data/DJMaxBG instead of Data/Tmp to persist across restarts
+                        fs::path tempDir = fs::current_path() / "Data" / "BG" / pakPath.stem().string();
+
+                        // Extract all eyecatch images from PAK only once
+                        if (fs::exists(pakPath) && extractedPaks.find(pakKey) == extractedPaks.end()) {
+                            extractedPaks[pakKey] = true;  // Mark as processed
+                            SDL_Log("[PAK BG] Processing: %s", pakPath.string().c_str());
+
+                            static PakExtractor bgPakExtractor;
+                            static bool bgKeysLoaded = false;
+                            if (!bgKeysLoaded) {
+                                bgKeysLoaded = bgPakExtractor.loadKeys("D:\\work\\DJMax_Online\\Xip-Pak-Extractor-main\\keyFiles");
+                                SDL_Log("[PAK BG] Keys loaded: %d", bgKeysLoaded);
+                            }
+                            if (bgKeysLoaded && bgPakExtractor.open(pakPath.string())) {
+                                SDL_Log("[PAK BG] Opened, files: %zu", bgPakExtractor.getFileList().size());
+                                // Print first 5 filenames to see structure
+                                int printed = 0;
+                                for (const auto& pakFile : bgPakExtractor.getFileList()) {
+                                    if (printed < 5) {
+                                        SDL_Log("[PAK BG] File: %s", pakFile.filename.c_str());
+                                        printed++;
+                                    }
+                                }
+                                int eyecatchCount = 0;
+                                for (const auto& pakFile : bgPakExtractor.getFileList()) {
+                                    // Case-insensitive check for eyecatch
+                                    std::string lowerName = pakFile.filename;
+                                    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+                                    if (lowerName.find("/eyecatch/") != std::string::npos ||
+                                        lowerName.find("\\eyecatch\\") != std::string::npos) {
+                                        eyecatchCount++;
+                                        std::string ext = fs::path(pakFile.filename).extension().string();
+                                        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                                        if (ext == ".jpg" || ext == ".png" || ext == ".jpeg") {
+                                            fs::path outPath = tempDir / pakFile.filename;
+                                            if (!fs::exists(outPath)) {
+                                                std::vector<uint8_t> data;
+                                                if (bgPakExtractor.extractFile(pakFile.filename, data)) {
+                                                    fs::create_directories(outPath.parent_path());
+                                                    std::ofstream out(outPath, std::ios::binary);
+                                                    if (out) {
+                                                        out.write(reinterpret_cast<char*>(data.data()), data.size());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                SDL_Log("[PAK BG] Found %d eyecatch files", eyecatchCount);
+                                bgPakExtractor.close();
+                            }
+                        }
+
+                        // Map difficulty version to suffix
+                        std::string diffSuffix = "hd";
+                        if (diff.version == "Easy") diffSuffix = "ez";
+                        else if (diff.version == "Normal") diffSuffix = "nm";
+                        else if (diff.version == "Hard") diffSuffix = "hd";
+                        else if (diff.version == "Maximum") diffSuffix = "mx";
+                        else if (diff.version == "SC") diffSuffix = "sc";
+
+                        // Check for extracted file
+                        fs::path outPath1 = tempDir / "song" / songName / "eyecatch" / (songName + "_" + diffSuffix + ".jpg");
+                        fs::path outPath2 = tempDir / "song" / songName / "eyecatch" / (songName + "_ORG_" + diffSuffix + ".jpg");
+                        if (fs::exists(outPath1)) {
+                            diff.backgroundPath = outPath1.string();
+                        } else if (fs::exists(outPath2)) {
+                            diff.backgroundPath = outPath2.string();
+                        }
+                    }
                 }
 
                 song.beatmapFiles.push_back(diff.path);
@@ -5442,6 +5688,7 @@ void Game::scanSongsFolder() {
                 BeatmapInfo tempInfo;
                 if (BMSParser::parse(diff.path, tempInfo)) {
                     diff.keyCount = tempInfo.keyCount;
+                    diff.hash = OsuParser::calculateMD5(diff.path);  // Hash for replay matching
                     // For BMS: version = TITLE + ARTIST + Lv.X
                     std::string diffName = tempInfo.title;
                     if (!tempInfo.artist.empty()) {
@@ -5490,12 +5737,14 @@ void Game::scanSongsFolder() {
                     std::cout << "[IIDX] Scanning: " << file.path().string() << std::endl;
                     auto availDiffs = IIDXParser::getAvailableDifficulties(file.path().string());
                     std::cout << "[IIDX] Found " << availDiffs.size() << " difficulties" << std::endl;
+                    std::string iidxFileHash = OsuParser::calculateMD5(file.path().string());
 
                     for (int diffIdx : availDiffs) {
                         DifficultyInfo diff;
                         diff.path = file.path().string();
                         diff.keyCount = (diffIdx >= 5) ? 16 : 8;  // DP = 16, SP = 8
                         diff.version = IIDXParser::getDifficultyName(diffIdx);
+                        diff.hash = iidxFileHash + ":" + std::to_string(diffIdx);  // Hash with difficulty index
 
                         std::cout << "[IIDX] Parsing difficulty: " << diff.version << std::endl;
 
@@ -5565,6 +5814,7 @@ void Game::scanSongsFolder() {
                     // Parse to get star rating
                     BeatmapInfo tempInfo;
                     if (MuSynxParser::parse(diff.path, tempInfo)) {
+                        diff.hash = OsuParser::calculateMD5(diff.path);  // Hash for replay matching
                         diff.starRatings[0] = calculateStarRating(tempInfo.notes, diff.keyCount,
                             StarRatingVersion::OsuStable_b20260101);
                         diff.starRatings[1] = calculateStarRating(tempInfo.notes, diff.keyCount,
@@ -5594,8 +5844,9 @@ void Game::scanSongsFolder() {
                     song.artist = line.substr(7);
                 } else if (line.find("AudioFilename:") == 0) {
                     audioFile = line.substr(14);
-                    // Trim whitespace
-                    while (!audioFile.empty() && audioFile[0] == ' ') audioFile.erase(0, 1);
+                    // Trim whitespace and \r\n
+                    while (!audioFile.empty() && (audioFile[0] == ' ' || audioFile[0] == '\t')) audioFile.erase(0, 1);
+                    while (!audioFile.empty() && (audioFile.back() == '\r' || audioFile.back() == '\n')) audioFile.pop_back();
                 } else if (line.find("PreviewTime:") == 0) {
                     std::string val = line.substr(12);
                     while (!val.empty() && val[0] == ' ') val.erase(0, 1);
@@ -5781,7 +6032,10 @@ void Game::scanSongsFolder() {
             cd.version = d.version;
             cd.creator = d.creator;
             cd.hash = d.hash;
+            cd.backgroundPath = d.backgroundPath;
+            cd.audioPath = d.audioPath;
             cd.keyCount = d.keyCount;
+            cd.previewTime = d.previewTime;
             for (int v = 0; v < STAR_RATING_VERSION_COUNT; v++) {
                 cd.starRatings[v] = d.starRatings[v];
             }
@@ -5852,35 +6106,134 @@ sort_and_return:
     }
 }
 
-void Game::loadSongBackground(int index) {
+void Game::loadSongBackground(int songIndex, int diffIndex) {
+    // Cancel any pending background load
+    if (bgLoadThread.joinable()) {
+        bgLoadThread.join();
+    }
+
+    // Free pending load data if any
+    {
+        std::lock_guard<std::mutex> lock(bgLoadMutex);
+        if (bgLoadData) {
+            stbi_image_free(bgLoadData);
+            bgLoadData = nullptr;
+        }
+        bgLoadPending = false;
+    }
+
     // Free previous texture
     if (currentBgTexture) {
         SDL_DestroyTexture(currentBgTexture);
         currentBgTexture = nullptr;
     }
 
-    if (index < 0 || index >= (int)songList.size()) return;
+    if (songIndex < 0 || songIndex >= (int)songList.size()) return;
 
-    const SongEntry& song = songList[index];
-    if (song.backgroundPath.empty()) return;
+    const SongEntry& song = songList[songIndex];
 
-    int width, height, channels;
-    unsigned char* data = stbi_load(song.backgroundPath.c_str(), &width, &height, &channels, 4);
-    if (data) {
-        SDL_Surface* surface = SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32);
+    // Determine background path: use difficulty-specific if available, otherwise song-level
+    std::string bgPath;
+    if (diffIndex >= 0 && diffIndex < (int)song.difficulties.size() &&
+        !song.difficulties[diffIndex].backgroundPath.empty()) {
+        bgPath = song.difficulties[diffIndex].backgroundPath;
+    } else {
+        bgPath = song.backgroundPath;
+    }
+
+    if (bgPath.empty()) return;
+
+    // Start async load
+    bgLoadThread = std::thread([this, bgPath]() {
+        int width, height, channels;
+        unsigned char* data = stbi_load(bgPath.c_str(), &width, &height, &channels, 4);
+
+        // Crop DJMAX Online eyecatch images (1024x1024 -> 800x600)
+        if (data && width == 1024 && height == 1024) {
+            const int cropW = 800, cropH = 600;
+            unsigned char* cropped = (unsigned char*)malloc(cropW * cropH * 4);
+            if (cropped) {
+                for (int y = 0; y < cropH; y++) {
+                    memcpy(cropped + y * cropW * 4, data + y * width * 4, cropW * 4);
+                }
+                stbi_image_free(data);
+                data = cropped;
+                width = cropW;
+                height = cropH;
+            }
+        }
+
+        std::lock_guard<std::mutex> lock(bgLoadMutex);
+        bgLoadData = data;
+        bgLoadWidth = width;
+        bgLoadHeight = height;
+        bgLoadPending = true;
+    });
+}
+
+void Game::updateBackgroundLoad() {
+    if (!bgLoadPending) return;
+
+    std::lock_guard<std::mutex> lock(bgLoadMutex);
+    if (bgLoadData) {
+        SDL_Surface* surface = SDL_CreateSurface(bgLoadWidth, bgLoadHeight, SDL_PIXELFORMAT_RGBA32);
         if (surface) {
             SDL_LockSurface(surface);
-            memcpy(surface->pixels, data, width * height * 4);
+            memcpy(surface->pixels, bgLoadData, bgLoadWidth * bgLoadHeight * 4);
             SDL_UnlockSurface(surface);
+            if (currentBgTexture) {
+                SDL_DestroyTexture(currentBgTexture);
+            }
             currentBgTexture = SDL_CreateTextureFromSurface(renderer.getRenderer(), surface);
             SDL_DestroySurface(surface);
         }
-        stbi_image_free(data);
+        stbi_image_free(bgLoadData);
+        bgLoadData = nullptr;
     }
+    bgLoadPending = false;
 }
 
-void Game::playPreviewMusic(int index) {
-    if (index < 0 || index >= (int)songList.size()) return;
+void Game::playPreviewMusic(int songIndex, int diffIndex) {
+    if (songIndex < 0 || songIndex >= (int)songList.size()) return;
+
+    const SongEntry& song = songList[songIndex];
+
+    // Determine audio path and preview time: use difficulty-specific if available
+    std::string audioPath;
+    int previewTime = 0;
+    if (diffIndex >= 0 && diffIndex < (int)song.difficulties.size() &&
+        !song.difficulties[diffIndex].audioPath.empty()) {
+        audioPath = song.difficulties[diffIndex].audioPath;
+        previewTime = song.difficulties[diffIndex].previewTime;
+    } else {
+        audioPath = song.audioPath;
+        previewTime = song.previewTime;
+    }
+
+    // Normalize path separators for cross-platform compatibility
+    // (index cache may contain Windows-style backslashes or trailing \r\n)
+    if (!audioPath.empty()) {
+        // Remove trailing \r\n from Windows-created index cache
+        while (!audioPath.empty() && (audioPath.back() == '\r' || audioPath.back() == '\n')) {
+            audioPath.pop_back();
+        }
+        // Use fs::path to normalize and get proper UTF-8 encoding
+        audioPath = fs::path(audioPath).u8string();
+    }
+
+    if (audioPath.empty()) {
+        // No audio for this song/difficulty - stop current preview if playing
+        if (audio.isPlaying()) {
+            stopPreviewMusic();
+        }
+        currentPreviewAudioPath.clear();
+        return;
+    }
+
+    // Check if the same audio is already playing - no need to reload
+    if (audioPath == currentPreviewAudioPath && audio.isPlaying()) {
+        return;
+    }
 
     // Reset playback rate to 1.0 for preview (in case DT/HT was enabled during gameplay)
     audio.setPlaybackRate(1.0f);
@@ -5891,19 +6244,18 @@ void Game::playPreviewMusic(int index) {
         previewFadeIn = false;
         previewFadeStart = SDL_GetTicks();
         previewFadeDuration = 150;
-        previewTargetIndex = index;
+        previewTargetIndex = songIndex;
+        previewTargetDiffIndex = diffIndex;
     } else {
         // Start playing directly with fade in
-        const SongEntry& song = songList[index];
-        if (song.audioPath.empty()) return;
-
-        if (audio.loadMusic(song.audioPath)) {  // loop by default for preview
+        if (audio.loadMusic(audioPath)) {  // loop by default for preview
+            currentPreviewAudioPath = audioPath;
             audio.setVolume(0);
             audio.play();
             // setPosition after play
-            if (song.previewTime > 0) {
-                audio.setPosition(song.previewTime);
-            } else if (song.previewTime == -1) {
+            if (previewTime > 0) {
+                audio.setPosition(previewTime);
+            } else if (previewTime == -1) {
                 int64_t duration = audio.getDuration();
                 audio.setPosition((int64_t)(duration * 0.4));
             }
@@ -5944,17 +6296,38 @@ void Game::updatePreviewFade() {
         audio.setVolume((int)((1.0f - t) * 100));
         if (t >= 1.0f) {
             audio.stop();
+            currentPreviewAudioPath.clear();
             previewFading = false;
             // If there's a target song, play it
             if (previewTargetIndex >= 0) {
                 const SongEntry& song = songList[previewTargetIndex];
-                if (!song.audioPath.empty() && audio.loadMusic(song.audioPath)) {
+                // Determine audio path and preview time from difficulty if available
+                std::string audioPath;
+                int previewTime = 0;
+                if (previewTargetDiffIndex >= 0 && previewTargetDiffIndex < (int)song.difficulties.size() &&
+                    !song.difficulties[previewTargetDiffIndex].audioPath.empty()) {
+                    audioPath = song.difficulties[previewTargetDiffIndex].audioPath;
+                    previewTime = song.difficulties[previewTargetDiffIndex].previewTime;
+                } else {
+                    audioPath = song.audioPath;
+                    previewTime = song.previewTime;
+                }
+                // Normalize path for cross-platform compatibility
+                if (!audioPath.empty()) {
+                    // Remove trailing \r\n from Windows-created index cache
+                    while (!audioPath.empty() && (audioPath.back() == '\r' || audioPath.back() == '\n')) {
+                        audioPath.pop_back();
+                    }
+                    audioPath = fs::path(audioPath).u8string();
+                }
+                if (!audioPath.empty() && audio.loadMusic(audioPath)) {
+                    currentPreviewAudioPath = audioPath;
                     audio.setVolume(0);
                     audio.play();
                     // setPosition after play
-                    if (song.previewTime > 0) {
-                        audio.setPosition(song.previewTime);
-                    } else if (song.previewTime == -1) {
+                    if (previewTime > 0) {
+                        audio.setPosition(previewTime);
+                    } else if (previewTime == -1) {
                         int64_t duration = audio.getDuration();
                         audio.setPosition((int64_t)(duration * 0.4));
                     }

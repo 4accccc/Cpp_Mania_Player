@@ -113,7 +113,7 @@ private:
     float hitErrorTargetPos;       // Target position (after 0.8/0.2 smoothing)
     float hitErrorAnimStartPos;    // Animation start position
     int64_t hitErrorAnimStartTime; // Animation start time
-    size_t lastHitErrorCount;      // Track hit count to detect new hits
+    int64_t lastHitErrorTime;      // Track last hit time to detect new hits
 
     // Skin-based layout (calculated from ManiaConfig)
     std::vector<float> columnWidths;   // Width of each column

@@ -1,12 +1,13 @@
 #include "Renderer.h"
 #include "SkinManager.h"
 #include <algorithm>
+#include <cmath>
 
 Renderer::Renderer() : window(nullptr), renderer(nullptr), font(nullptr),
                        windowWidth(1280), windowHeight(720), judgeLineY(620),
                        keyCount(4), laneWidth(100), hitErrorIndicatorPos(0.0f),
                        hitErrorTargetPos(0.0f), hitErrorAnimStartPos(0.0f),
-                       hitErrorAnimStartTime(0), lastHitErrorCount(0),
+                       hitErrorAnimStartTime(0), lastHitErrorTime(0),
                        stageStartX(0), stageWidth(0), skinHitPosition(620),
                        hpBarCurrentFrame(0), hpBarLastFrameTime(0), hpBarFrameCount(0) {
     updateLaneLayout();
@@ -54,7 +55,7 @@ void Renderer::resetHitErrorIndicator() {
     hitErrorTargetPos = 0.0f;
     hitErrorAnimStartPos = 0.0f;
     hitErrorAnimStartTime = 0;
-    lastHitErrorCount = 0;
+    lastHitErrorTime = 0;
     // Reset lightingN hit times to prevent ghost effects
     for (int i = 0; i < 18; i++) {
         lightingNHitTime[i] = INT64_MIN;
@@ -1970,19 +1971,14 @@ void Renderer::renderHitErrorBar(const std::vector<HitError>& errors, int64_t cu
     // Update indicator position using osu! style animation
     // Only update target when a new hit occurs, then use 800ms tween
     if (!errors.empty()) {
-        // Check if there's a new hit
-        if (errors.size() != lastHitErrorCount) {
-            lastHitErrorCount = errors.size();
+        // Get the most recent error (errors are pushed in chronological order)
+        const auto& mostRecent = errors.back();
+        int64_t mostRecentTime = mostRecent.time;
+        float mostRecentOffset = (float)mostRecent.offset;
 
-            // Find the most recent error
-            int64_t mostRecentTime = 0;
-            float mostRecentOffset = 0;
-            for (const auto& err : errors) {
-                if (err.time > mostRecentTime) {
-                    mostRecentTime = err.time;
-                    mostRecentOffset = (float)err.offset;
-                }
-            }
+        // Check if there's a new hit (by comparing time, not size)
+        if (mostRecentTime > lastHitErrorTime) {
+            lastHitErrorTime = mostRecentTime;
 
             // Calculate new target position with osu! style smoothing (0.8/0.2)
             float newTargetPos = mostRecentOffset / (float)windowMiss * halfWidth;

@@ -1,6 +1,54 @@
-  # BASS
-  **/bass
-  **/**/bass.lib
-  **/**/bass_fx.lib
-  bass.dll
-  bass_fx.dll
+build/
+build-*/
+cmake-build-*/
+out/
+Release/
+Debug/
+x64/
+x86/
+
+*.exe
+*.dll
+*.so
+*.dylib
+
+*.o
+*.obj
+
+.vs/
+.vscode/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.suo
+*.user
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+.idea/
+*.swp
+*~
+
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+.DS_Store
+Thumbs.db
+
+*.tmp
+*.log
+
+Data/
+Songs/
+Skins/
+Replays/
+
+lib/
+
+*.idx
+index.cache

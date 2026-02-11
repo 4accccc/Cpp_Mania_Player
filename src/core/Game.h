@@ -4,6 +4,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <fstream>
 #include "Note.h"
 #include "OsuParser.h"
 #include "BMSParser.h"
@@ -78,6 +79,10 @@ struct DifficultyInfo {
     // Star ratings for each algorithm version (matches STAR_RATING_VERSION_COUNT)
     // [0] = b20260101, [1] = b20220101
     double starRatings[2] = {0.0, 0.0};
+    // Per-difficulty background and audio (may differ from song-level defaults)
+    std::string backgroundPath;  // Background image path for this difficulty
+    std::string audioPath;       // Audio file path for this difficulty
+    int previewTime = 0;         // Preview start time in ms (-1 = 40% position)
 };
 
 // Song entry for song select screen
@@ -263,11 +268,19 @@ private:
     int songSelectDragStartY;  // Mouse Y when drag started
     float songSelectDragStartScroll;  // Scroll value when drag started
     SDL_Texture* currentBgTexture;  // Background texture for selected song
+    // Async background loading
+    std::thread bgLoadThread;
+    std::atomic<bool> bgLoadPending{false};
+    std::mutex bgLoadMutex;
+    unsigned char* bgLoadData = nullptr;
+    int bgLoadWidth = 0;
+    int bgLoadHeight = 0;
     bool songSelectTransition;  // True when transitioning out
     int64_t songSelectTransitionStart;  // Transition start time
     void scanSongsFolder();
-    void loadSongBackground(int index);
-    void playPreviewMusic(int index);
+    void loadSongBackground(int songIndex, int diffIndex = -1);
+    void updateBackgroundLoad();  // Check async background load completion
+    void playPreviewMusic(int songIndex, int diffIndex = -1);
     void stopPreviewMusic();
     void updatePreviewFade();  // Update fade in/out
 
@@ -277,12 +290,19 @@ private:
     int64_t previewFadeStart;
     int previewFadeDuration;
     int previewTargetIndex;  // Song to play after fade out
+    int previewTargetDiffIndex;  // Difficulty to play after fade out
+    std::string currentPreviewAudioPath;  // Currently playing audio path (to avoid reloading same audio)
 
     // Replay Factory
     std::string factoryReplayPath;  // Loaded replay file path
     ReplayInfo factoryReplayInfo;   // Loaded replay data
     ReplayInfo factoryReplayInfoMirrored;  // Mirrored replay data
     bool factoryMirrorInput = false; // Mirror input checkbox state
+
+    // Fix Hash difficulty selection
+    bool factoryFixHashPending = false;  // Waiting for difficulty selection
+    std::string factoryFixHashPath;      // File path pending hash fix
+    int factoryFixHashType = 0;          // 0=none, 1=O2Jam, 2=IIDX
 
     // Replay Factory editing states
     bool editingPlayerName = false;
@@ -304,6 +324,7 @@ private:
 
     // Video Generation
     VideoGenerator videoGenerator;
+    std::ofstream lockFile;  // For single instance detection
     bool editingBlockHeight = false;
     std::string blockHeightInput = "40";
     bool editingVideoWidth = false;

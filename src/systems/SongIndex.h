@@ -12,7 +12,10 @@ struct CachedDifficulty {
     std::string version;
     std::string creator;
     std::string hash;  // MD5 hash of beatmap file
+    std::string backgroundPath;  // Per-difficulty background
+    std::string audioPath;       // Per-difficulty audio
     int keyCount;
+    int previewTime;             // Per-difficulty preview time
     // Star ratings for each algorithm version:
     // [0] = b20260101, [1] = b20220101
     double starRatings[STAR_RATING_VERSION_COUNT];

@@ -1,5 +1,5 @@
 # Mania Player
-### A cross-platform(in planned) rhythm game. Written in C++/SDL3.
+### A cross-platform(half-way there!) rhythm game. Written in C++/SDL3.
 
 ## Features
 
@@ -173,11 +173,73 @@ This project uses the following third-party libraries:
 
 
 
+### Mania Player v0.0.6a
+
+- 构建系统转向cmake，现在支持linux平台。
+- 修改了 Fix Beatmap Hash 的逻辑。现在对于包含多难度的单文件，会弹出难度选择窗口。
+- 修复选歌界面更换难度时背景图片和背景音乐不会跟着换的问题
+- 修复部分谱面导出回放后再用游戏播放提示无法正确找到谱面的问题
+- 修复部分谱面游玩时没有背景图片的问题
+- 修复 Generate Video 无法读取除了 *.osu 以外的谱面的问题
+- 修复打击偏移条上方三角形不会移动的问题
+
+
+
 ## Building
 
-1. Download BASS and BASS_FX from https://www.un4seen.com/
-2. Place `bass.lib` and `bass_fx.lib` in `lib/x64/`
-3. Run build.bat.
+### Prerequisites
+
+Create `lib/x64/` directory and download the following libraries:
+
+| Library | Download | Files Needed |
+|---------|----------|--------------|
+| SDL3 | [GitHub Releases](https://github.com/libsdl-org/SDL/releases) | `SDL3.lib`, `SDL3.dll` |
+| SDL3_ttf | [GitHub Releases](https://github.com/libsdl-org/SDL_ttf/releases) | `SDL3_ttf.lib`, `SDL3_ttf.dll` |
+| BASS | [un4seen.com](https://www.un4seen.com/download.php?bass24) | `bass.lib`, `bass.dll` |
+| BASS_FX | [un4seen.com](https://www.un4seen.com/download.php?bass_fx24) | `bass_fx.lib`, `bass_fx.dll` |
+| ICU | [GitHub Releases](https://github.com/nickshanks/ICU/releases) or build from source | `icuuc.lib`, `icuin.lib`, `icuuc*.dll`, `icuin*.dll`, `icudt*.dll` |
+| FFmpeg | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) (shared build) | `avcodec.lib`, `avformat.lib`, `avutil.lib`, `swscale.lib` + DLLs |
+
+Place `.lib` files in `lib/x64/` and `.dll` files in the output directory (or system PATH).
+
+### Windows (MSVC)
+
+```batch
+# Using build.bat (Visual Studio 2022+)
+build.bat
+
+# Or using CMake
+mkdir build && cd build
+cmake .. -G "Visual Studio 17 2022" -A x64
+cmake --build . --config Release
+```
+
+### Linux
+
+Install dependencies first:
+```bash
+# Ubuntu/Debian
+sudo apt install build-essential cmake pkg-config
+sudo apt install libicu-dev libffmpeg-dev
+
+# SDL3 and SDL3_ttf (build from source)
+# See: https://github.com/libsdl-org/SDL
+# See: https://github.com/libsdl-org/SDL_ttf
+
+# BASS 
+# Place libbass.so and libbass_fx.so in /usr/local/lib or use LD_LIBRARY_PATH
+```
+
+Build:
+```bash
+mkdir build && cd build
+cmake ..
+make -j$(nproc)
+```
+
+### macOS
+
+macOS support is experimental. You'll need to install dependencies via Homebrew or build from source.
 
 
 

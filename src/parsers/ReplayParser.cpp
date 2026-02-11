@@ -1,4 +1,5 @@
 #include "ReplayParser.h"
+#include "MD5.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -8,11 +9,9 @@
 #include <algorithm>
 #include <set>
 #include <chrono>
+#include <filesystem>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <wincrypt.h>
-#endif
+namespace fs = std::filesystem;
 
 // LZMA decoder
 #include "LzmaDec.h"
@@ -163,15 +162,8 @@ void ReplayParser::parseFrames(const std::string& data, std::vector<ReplayFrame>
 }
 
 bool ReplayParser::parse(const std::string& filepath, ReplayInfo& info) {
-#ifdef _WIN32
-    // Convert UTF-8 path to wide string for Windows
-    int wideLen = MultiByteToWideChar(CP_UTF8, 0, filepath.c_str(), -1, nullptr, 0);
-    std::wstring widePath(wideLen - 1, 0);
-    MultiByteToWideChar(CP_UTF8, 0, filepath.c_str(), -1, &widePath[0], wideLen);
-    std::ifstream file(widePath, std::ios::binary);
-#else
-    std::ifstream file(filepath, std::ios::binary);
-#endif
+    // Use std::filesystem::path for cross-platform UTF-8 support
+    std::ifstream file(fs::u8path(filepath), std::ios::binary);
     if (!file) {
         std::cerr << "Failed to open replay file: " << filepath << std::endl;
         return false;
@@ -264,7 +256,6 @@ bool ReplayParser::parse(const std::string& filepath, ReplayInfo& info) {
 }
 
 std::string ReplayParser::calculateReplayHash(const ReplayInfo& info) {
-#ifdef _WIN32
     // Formula: MD5(MaxCombo + "osu" + PlayerName + BeatmapHash + TotalScore + Grade + Timestamp)
 
     // Calculate Grade
@@ -282,50 +273,26 @@ std::string ReplayParser::calculateReplayHash(const ReplayInfo& info) {
     else if (accuracy > 0.6) grade = "C";
     else grade = "D";
 
-    // Convert timestamp to DateTime string
-    // Windows FILETIME: 从1601年1月1日起的100纳秒间隔数
-    FILETIME ft;
-    ft.dwLowDateTime = (DWORD)(info.timestamp & 0xFFFFFFFF);
-    ft.dwHighDateTime = (DWORD)(info.timestamp >> 32);
-    SYSTEMTIME st;
-    FileTimeToSystemTime(&ft, &st);
+    // Convert Windows FILETIME to DateTime string
+    // FILETIME: 100-nanosecond intervals since January 1, 1601
+    // Convert to Unix time first, then to tm struct
+    const int64_t FILETIME_UNIX_DIFF = 116444736000000000LL; // 100-ns intervals between 1601 and 1970
+    int64_t unixTime = (info.timestamp - FILETIME_UNIX_DIFF) / 10000000LL;
 
+    std::tm* tm = std::gmtime(reinterpret_cast<const time_t*>(&unixTime));
     std::ostringstream timeStr;
-    timeStr << st.wYear << "/" << st.wMonth << "/" << st.wDay << " "
-            << st.wHour << ":" << std::setfill('0') << std::setw(2) << st.wMinute << ":"
-            << std::setfill('0') << std::setw(2) << st.wSecond;
+    if (tm) {
+        timeStr << (tm->tm_year + 1900) << "/" << (tm->tm_mon + 1) << "/" << tm->tm_mday << " "
+                << tm->tm_hour << ":" << std::setfill('0') << std::setw(2) << tm->tm_min << ":"
+                << std::setfill('0') << std::setw(2) << tm->tm_sec;
+    }
 
     std::ostringstream ss;
     ss << info.maxCombo << "osu" << info.playerName << info.beatmapHash
        << info.totalScore << grade << timeStr.str();
 
     std::string data = ss.str();
-
-    HCRYPTPROV hProv = 0;
-    HCRYPTHASH hHash = 0;
-    std::string result;
-
-    if (CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
-        if (CryptCreateHash(hProv, CALG_MD5, 0, 0, &hHash)) {
-            if (CryptHashData(hHash, (BYTE*)data.data(), data.size(), 0)) {
-                BYTE hash[16];
-                DWORD hashLen = 16;
-                if (CryptGetHashParam(hHash, HP_HASHVAL, hash, &hashLen, 0)) {
-                    std::ostringstream oss;
-                    for (int i = 0; i < 16; i++) {
-                        oss << std::hex << std::setfill('0') << std::setw(2) << (int)hash[i];
-                    }
-                    result = oss.str();
-                }
-            }
-            CryptDestroyHash(hHash);
-        }
-        CryptReleaseContext(hProv, 0);
-    }
-    return result;
-#else
-    return "";
-#endif
+    return MD5::hash((uint8_t*)data.data(), data.size());
 }
 
 // Write methods
@@ -508,15 +475,8 @@ bool ReplayParser::save(const std::string& filepath, const ReplayInfo& info) {
         writeInt64(buffer, (int64_t)raw);
     }
 
-    // Write to file
-#ifdef _WIN32
-    int wideLen = MultiByteToWideChar(CP_UTF8, 0, filepath.c_str(), -1, nullptr, 0);
-    std::wstring widePath(wideLen - 1, 0);
-    MultiByteToWideChar(CP_UTF8, 0, filepath.c_str(), -1, &widePath[0], wideLen);
-    std::ofstream file(widePath, std::ios::binary);
-#else
-    std::ofstream file(filepath, std::ios::binary);
-#endif
+    // Write to file using std::filesystem for cross-platform UTF-8 support
+    std::ofstream file(fs::u8path(filepath), std::ios::binary);
 
     if (!file) {
         std::cerr << "Failed to create replay file: " << filepath << std::endl;

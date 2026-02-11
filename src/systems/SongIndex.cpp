@@ -6,10 +6,10 @@
 namespace fs = std::filesystem;
 
 // Index file version (increment when format changes)
-static const int INDEX_VERSION = 5;
+static const int INDEX_VERSION = 6;
 
 std::string SongIndex::getIndexDir() {
-    return "Data\\Index";
+    return (fs::path("Data") / "Index").string();
 }
 
 std::string SongIndex::hashPath(const std::string& path) {
@@ -26,7 +26,7 @@ std::string SongIndex::getIndexPath(const std::string& folderPath) {
     if (!fs::exists(indexDir)) {
         fs::create_directories(indexDir);
     }
-    return indexDir + "\\" + hashPath(folderPath) + ".idx";
+    return (fs::path(indexDir) / (hashPath(folderPath) + ".idx")).string();
 }
 
 int64_t SongIndex::getFolderModTime(const std::string& folderPath) {
@@ -113,7 +113,10 @@ bool SongIndex::loadIndex(const std::string& folderPath, CachedSong& song) {
         diff.version = readString(f);
         diff.creator = readString(f);
         diff.hash = readString(f);
+        diff.backgroundPath = readString(f);
+        diff.audioPath = readString(f);
         f.read(reinterpret_cast<char*>(&diff.keyCount), sizeof(diff.keyCount));
+        f.read(reinterpret_cast<char*>(&diff.previewTime), sizeof(diff.previewTime));
         f.read(reinterpret_cast<char*>(diff.starRatings), sizeof(diff.starRatings));
         song.difficulties.push_back(diff);
     }
@@ -152,7 +155,10 @@ bool SongIndex::saveIndex(const CachedSong& song) {
         writeString(f, diff.version);
         writeString(f, diff.creator);
         writeString(f, diff.hash);
+        writeString(f, diff.backgroundPath);
+        writeString(f, diff.audioPath);
         f.write(reinterpret_cast<const char*>(&diff.keyCount), sizeof(diff.keyCount));
+        f.write(reinterpret_cast<const char*>(&diff.previewTime), sizeof(diff.previewTime));
         f.write(reinterpret_cast<const char*>(diff.starRatings), sizeof(diff.starRatings));
     }
 
