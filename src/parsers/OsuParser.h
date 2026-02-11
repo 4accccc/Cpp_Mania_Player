@@ -17,8 +17,10 @@ struct StoryboardSample {
     int64_t time;
     std::string filename;
     int volume;
+    int layer = 0;
     int sampleHandle = -1;  // Filled by KeySoundManager
     int fallbackHandle = -1;  // Fallback sample ID for O2Jam
+    int customIndex = -1;  // Sample ID for IIDX S3P
 };
 
 struct BeatmapInfo {

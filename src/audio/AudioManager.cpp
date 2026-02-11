@@ -201,6 +201,20 @@ int AudioManager::loadSample(const std::string& filepath) {
     return handle;
 }
 
+int AudioManager::loadSampleFromMemory(const void* data, size_t size) {
+    if (!initialized || !data || size == 0) return -1;
+
+    HSAMPLE sample = BASS_SampleLoad(TRUE, data, 0, static_cast<DWORD>(size), 65535, BASS_SAMPLE_OVER_POS);
+    if (!sample) {
+        std::cerr << "BASS_SampleLoad (memory) failed: " << BASS_ErrorGetCode() << std::endl;
+        return -1;
+    }
+
+    int handle = nextSampleHandle++;
+    sampleCache[handle] = sample;
+    return handle;
+}
+
 void AudioManager::playSample(int handle, int volume) {
     auto it = sampleCache.find(handle);
     if (it == sampleCache.end()) return;

@@ -18,6 +18,12 @@ public:
     // Load a sample file, returns handle (-1 on failure)
     int loadSample(const std::string& filename);
 
+    // Load all samples from S3P file (IIDX format)
+    bool loadS3PSamples(const std::string& s3pPath);
+
+    // Load all samples from 2DX file (IIDX format)
+    bool load2DXSamples(const std::string& twoDxPath);
+
     // Preload all key sounds for a beatmap
     void preloadKeySounds(std::vector<Note>& notes);
 
@@ -42,6 +48,9 @@ private:
 
     // Cache: filename (without extension) -> handle
     std::unordered_map<std::string, int> sampleCache;
+
+    // S3P sample cache: sample ID -> handle
+    std::unordered_map<int, int> s3pSampleCache;
 
     // Timing point volume (0-100)
     int timingPointVolume;

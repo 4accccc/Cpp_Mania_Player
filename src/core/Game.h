@@ -64,7 +64,8 @@ enum class BeatmapSource {
     O2Jam,
     BMS,
     Malody,
-    MuSynx
+    MuSynx,
+    IIDX           // beatmania IIDX (.1 files)
 };
 
 // Difficulty info for song select
@@ -102,7 +103,7 @@ public:
     void run();
 
 private:
-    bool loadBeatmap(const std::string& path);
+    bool loadBeatmap(const std::string& path, bool skipParsing = false);
     void resetGame();
     void cleanupTempDir();  // Clean up BGA textures when switching songs
     void cleanupTempFiles();  // Clean up temp files (startup/exit only)

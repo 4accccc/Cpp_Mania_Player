@@ -10,6 +10,8 @@
 #include "MalodyParser.h"
 #include "MuSynxParser.h"
 #include "AcbParser.h"
+#include "2dxParser.h"
+#include "IIDXSongDB.h"
 #include "StarRating.h"
 #include "SongIndex.h"
 #include "OsuMods.h"
@@ -557,10 +559,8 @@ void Game::loadConfig() {
 }
 
 void Game::resetGame() {
-    beatmap.notes.clear();
-    beatmap.timingPoints.clear();
-    beatmap.storyboardSamples.clear();
-    beatmap.audioFilename.clear();  // Clear audio filename
+    // Note: beatmap data (notes, timingPoints, etc.) is cleared in loadBeatmap
+    // when skipParsing=false, not here, to preserve async-loaded data
     for (int i = 0; i < 6; i++) judgementCounts[i] = 0;
     // Reset lane key states to prevent ghost key presses at game start
     for (int i = 0; i < 10; i++) {
@@ -584,8 +584,8 @@ void Game::resetGame() {
     renderer.resetKeyReleaseTime();  // Reset key image states
     debugLog.clear();
     hpManager.reset();
-    keySoundManager.clear();
-    audio.clearSamples();
+    // Note: keySoundManager.clear() and audio.clearSamples() moved to loadBeatmap
+    // when skipParsing=false, to preserve async-loaded keysounds
     deathTime = 0;
     deathSlowdown = 1.0f;
     deathMenuSelection = 1;
@@ -619,10 +619,15 @@ void Game::resetGame() {
     }
 }
 
-bool Game::loadBeatmap(const std::string& path) {
+bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
+    // Always reset game state (score, combo, etc.) regardless of skipParsing
     resetGame();
     beatmapPath = path;
-    beatmap = BeatmapInfo();  // Clear previous beatmap data
+    if (!skipParsing) {
+        beatmap = BeatmapInfo();  // Clear previous beatmap data
+        keySoundManager.clear();  // Clear keysounds only when re-parsing
+        audio.clearSamples();     // Clear audio samples only when re-parsing
+    }
 
     // Stop any playing audio first (preview music)
     audio.stop();
@@ -665,11 +670,13 @@ bool Game::loadBeatmap(const std::string& path) {
     bool isPT = PTParser::isPTFile(actualPath);
     bool isOjn = OjnParser::isOjnFile(actualPath);
     bool isBMS = BMSParser::isBMSFile(actualPath);
+    bool isIIDX = actualPath.size() > 2 && actualPath.substr(actualPath.size() - 2) == ".1";
     bool isMalody = actualPath.size() > 3 && actualPath.substr(actualPath.size() - 3) == ".mc";
     bool isMuSynx = actualPath.size() > 4 && actualPath.substr(actualPath.size() - 4) == ".txt" &&
                    (actualPath.find("4T_") != std::string::npos || actualPath.find("6T_") != std::string::npos);
     std::string ptAudioDir;  // For PT files with PAK extraction
 
+    if (!skipParsing) {
     if (isDJMax) {
         if (!DJMaxParser::parse(actualPath, beatmap)) {
             std::cerr << "Failed to parse DJMAX chart" << std::endl;
@@ -944,6 +951,28 @@ bool Game::loadBeatmap(const std::string& path) {
         }
 
         std::cout << "Loaded " << wavIdToHandle.size() << " WAV samples" << std::endl;
+    } else if (isIIDX) {
+        // Get difficulty index from version string
+        int diffIdx = IIDXParser::SP_ANOTHER;  // Default
+        for (int i = 0; i <= 10; i++) {
+            if (beatmap.version == IIDXParser::getDifficultyName(i)) {
+                diffIdx = i;
+                break;
+            }
+        }
+        if (!IIDXParser::parse(actualPath, beatmap, diffIdx)) {
+            std::cerr << "Failed to parse IIDX chart" << std::endl;
+            return false;
+        }
+        std::cout << "Loaded IIDX chart: " << beatmap.keyCount << "K" << std::endl;
+
+        // Load S3P keysounds for IIDX
+        std::filesystem::path chartPath(actualPath);
+        std::string songId = chartPath.stem().string();  // e.g., "32083"
+        std::filesystem::path s3pPath = chartPath.parent_path() / (songId + ".s3p");
+        if (std::filesystem::exists(s3pPath)) {
+            keySoundManager.loadS3PSamples(s3pPath.string());
+        }
     } else if (isMalody) {
         if (!MalodyParser::parse(actualPath, beatmap)) {
             std::cerr << "Failed to parse Malody chart" << std::endl;
@@ -1011,6 +1040,215 @@ bool Game::loadBeatmap(const std::string& path) {
                 return false;
             }
             std::cout << "Converted to " << targetKeyCount << "K mania" << std::endl;
+        }
+    }
+    } // end if (!skipParsing)
+
+    // Clear keysound cache before loading new keysounds
+    keySoundManager.clear();
+    audio.clearSamples();
+
+    // Load S3P/2DX keysounds for IIDX (must be outside skipParsing block)
+    bool isIIDXFile = path.size() > 2 && path.substr(path.size() - 2) == ".1";
+    std::cout << "[S3P DEBUG] path = '" << path << "', isIIDXFile = " << isIIDXFile << std::endl;
+    if (isIIDXFile) {
+        std::filesystem::path chartPath(path);
+        std::string songId = chartPath.stem().string();
+        std::filesystem::path s3pPath = chartPath.parent_path() / (songId + ".s3p");
+        std::filesystem::path twoDxPath = chartPath.parent_path() / (songId + ".2dx");
+
+        // Try S3P first, then 2DX (skip _pre.2dx files)
+        if (std::filesystem::exists(s3pPath)) {
+            std::cout << "[IIDX] Loading S3P: " << s3pPath.string() << std::endl;
+            keySoundManager.loadS3PSamples(s3pPath.string());
+        } else if (std::filesystem::exists(twoDxPath) && songId.find("_pre") == std::string::npos) {
+            std::cout << "[IIDX] Loading 2DX: " << twoDxPath.string() << std::endl;
+            keySoundManager.load2DXSamples(twoDxPath.string());
+        }
+    }
+
+    // Load OJM keysounds for O2Jam (must be outside skipParsing block)
+    bool isOjnFile = OjnParser::isOjnFile(actualPath);
+    if (isOjnFile) {
+        std::string ojmPath = OjmParser::getOjmPath(actualPath);
+        if (!ojmPath.empty()) {
+            OjmInfo ojmInfo;
+            if (OjmParser::parse(ojmPath, ojmInfo)) {
+                std::cout << "Loaded OJM: " << ojmInfo.samples.size() << " samples" << std::endl;
+
+                fs::path tempDir = fs::current_path() / "Data" / "Tmp" / "ojm";
+                fs::create_directories(tempDir);
+
+                std::unordered_map<int, int> sampleIdToHandle;
+                for (auto& [id, sample] : ojmInfo.samples) {
+                    std::string ext = sample.isOgg ? ".ogg" : ".wav";
+                    fs::path tempFile = tempDir / (std::to_string(id) + ext);
+
+                    std::ofstream out(tempFile, std::ios::binary);
+                    if (out) {
+                        out.write(reinterpret_cast<const char*>(sample.data.data()), sample.data.size());
+                        out.close();
+
+                        int handle = audio.loadSample(tempFile.string());
+                        if (handle >= 0) {
+                            sampleIdToHandle[id] = handle;
+                        }
+                    }
+                }
+
+                // Update notes with sample handles
+                for (auto& note : beatmap.notes) {
+                    if (note.customIndex > 0) {
+                        auto it = sampleIdToHandle.find(note.customIndex);
+                        if (it != sampleIdToHandle.end()) {
+                            note.sampleHandle = it->second;
+                        }
+                    }
+                }
+
+                // Update storyboard samples (BGM) with sample handles
+                for (auto& sample : beatmap.storyboardSamples) {
+                    if (sample.sampleHandle > 0) {
+                        int primaryId = sample.sampleHandle;
+                        int fallbackId = sample.fallbackHandle;
+
+                        auto it = sampleIdToHandle.find(primaryId);
+                        if (it != sampleIdToHandle.end()) {
+                            sample.sampleHandle = it->second;
+                        } else if (fallbackId > 0) {
+                            it = sampleIdToHandle.find(fallbackId);
+                            if (it != sampleIdToHandle.end()) {
+                                sample.sampleHandle = it->second;
+                            } else {
+                                sample.sampleHandle = -1;
+                            }
+                        } else {
+                            sample.sampleHandle = -1;
+                        }
+                        sample.fallbackHandle = -1;
+                    }
+                }
+
+                std::cout << "Loaded " << sampleIdToHandle.size() << " OJM samples" << std::endl;
+            }
+        }
+    }
+
+    // Load PAK keysounds for DJMAX Online PT files (must be outside skipParsing block)
+    bool isPTFile = PTParser::isPTFile(path);
+    if (isPTFile) {
+        fs::path ptPath(path);
+        std::string stemStr = ptPath.stem().string();
+        size_t underscorePos = stemStr.find('_');
+        std::string baseName = (underscorePos != std::string::npos) ? stemStr.substr(0, underscorePos) : stemStr;
+        fs::path pakPath = ptPath.parent_path() / (baseName + ".pak");
+
+        if (!fs::exists(pakPath)) {
+            for (const auto& entry : fs::directory_iterator(ptPath.parent_path())) {
+                if (entry.path().extension() == ".pak") {
+                    pakPath = entry.path();
+                    break;
+                }
+            }
+        }
+
+        if (fs::exists(pakPath)) {
+            static PakExtractor pakExtractor;
+            static bool keysLoaded = false;
+            if (!keysLoaded) {
+                keysLoaded = pakExtractor.loadKeys("D:\\work\\DJMax_Online\\Xip-Pak-Extractor-main\\keyFiles");
+            }
+            if (keysLoaded && pakExtractor.open(pakPath.string())) {
+                fs::path tempDir = fs::current_path() / "Data" / "Tmp" / pakPath.stem().string();
+                fs::create_directories(tempDir);
+
+                for (const auto& fileEntry : pakExtractor.getFileList()) {
+                    std::string ext = fs::path(fileEntry.filename).extension().string();
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    bool isAudio = (ext == ".ogg" || ext == ".wav" || ext == ".mp3");
+                    if (isAudio) {
+                        std::vector<uint8_t> data;
+                        if (pakExtractor.extractFile(fileEntry.filename, data)) {
+                            fs::path outPath = tempDir / fs::path(fileEntry.filename).filename();
+                            std::ofstream out(outPath, std::ios::binary);
+                            if (out) {
+                                out.write(reinterpret_cast<char*>(data.data()), data.size());
+                            }
+                        }
+                    }
+                }
+                ptAudioDir = tempDir.string();
+                pakExtractor.close();
+            }
+        }
+    }
+
+    // Load WAV keysounds for BMS (must be outside skipParsing block)
+    bool isBMSFile = BMSParser::isBMSFile(actualPath);
+    std::cout << "[BMS DEBUG] isBMSFile=" << isBMSFile << ", actualPath=" << actualPath << std::endl;
+    if (isBMSFile) {
+        fs::path bmsDir = fs::path(actualPath).parent_path();
+
+        // Parse WAV definitions
+        BMSData bmsData;
+        if (BMSParser::parseFull(actualPath, bmsData)) {
+            std::unordered_map<int, int> wavIdToHandle;
+
+            for (const auto& [id, filename] : bmsData.wavDefs) {
+                fs::path wavPath = bmsDir / filename;
+                if (!fs::exists(wavPath)) {
+                    std::string stem = wavPath.stem().string();
+                    fs::path parent = wavPath.parent_path();
+                    for (const auto& ext : {".wav", ".ogg", ".mp3"}) {
+                        fs::path tryPath = parent / (stem + ext);
+                        if (fs::exists(tryPath)) {
+                            wavPath = tryPath;
+                            break;
+                        }
+                    }
+                }
+                if (fs::exists(wavPath)) {
+                    int handle = audio.loadSample(wavPath.string());
+                    if (handle >= 0) {
+                        wavIdToHandle[id] = handle;
+                    }
+                }
+            }
+
+            // Update notes with sample handles
+            for (auto& note : beatmap.notes) {
+                if (note.customIndex > 0) {
+                    auto it = wavIdToHandle.find(note.customIndex);
+                    if (it != wavIdToHandle.end()) {
+                        note.sampleHandle = it->second;
+                    }
+                }
+            }
+
+            // Update storyboard samples (BGM) with handles
+            for (auto& sample : beatmap.storyboardSamples) {
+                if (sample.sampleHandle > 0) {
+                    auto it = wavIdToHandle.find(sample.sampleHandle);
+                    if (it != wavIdToHandle.end()) {
+                        sample.sampleHandle = it->second;
+                    } else {
+                        sample.sampleHandle = -1;
+                    }
+                }
+            }
+
+            std::cout << "Loaded " << wavIdToHandle.size() << " BMS WAV samples" << std::endl;
+
+            // Load BGA
+            hasBga = false;
+            isBmsBga = false;
+            if (!bmsData.bgaEvents.empty()) {
+                bmsBgaManager.init(renderer.getRenderer());
+                bmsBgaManager.load(bmsData.bgaEvents, bmsData.bmpDefs, bmsData.directory);
+                hasBga = true;
+                isBmsBga = true;
+                std::cout << "BMS BGA: " << bmsData.bgaEvents.size() << " events" << std::endl;
+            }
         }
     }
 
@@ -1196,7 +1434,10 @@ void Game::loadBeatmapAsync(const std::string& path) {
 
     // Reset game state (thread-safe parts only)
     beatmapPath = path;
+    std::string savedVersion = beatmap.version;  // Save version for IIDX
+    std::cout << "[ASYNC DEBUG] savedVersion = '" << savedVersion << "'" << std::endl;
     beatmap = BeatmapInfo();
+    beatmap.version = savedVersion;  // Restore version for IIDX
 
     // Calculate clockRate (for non-replay mode, replay mode sets it later)
     clockRate = 1.0;
@@ -1232,6 +1473,7 @@ void Game::loadBeatmapAsync(const std::string& path) {
     bool isPT = PTParser::isPTFile(actualPath);
     bool isOjn = OjnParser::isOjnFile(actualPath);
     bool isBMS = BMSParser::isBMSFile(actualPath);
+    bool isIIDX = actualPath.size() > 2 && actualPath.substr(actualPath.size() - 2) == ".1";
     bool isMalody = actualPath.size() > 3 && actualPath.substr(actualPath.size() - 3) == ".mc";
     bool isMuSynx = actualPath.size() > 4 && actualPath.substr(actualPath.size() - 4) == ".txt" &&
                    (actualPath.find("4T_") != std::string::npos || actualPath.find("6T_") != std::string::npos);
@@ -1254,6 +1496,22 @@ void Game::loadBeatmapAsync(const std::string& path) {
     } else if (isBMS) {
         SET_STATUS("Parsing BMS chart...");
         parseSuccess = BMSParser::parse(actualPath, beatmap);
+    } else if (isIIDX) {
+        SET_STATUS("Parsing IIDX chart...");
+        // Get difficulty index from version string
+        int diffIdx = IIDXParser::SP_ANOTHER;  // Default
+        std::cout << "[IIDX DEBUG] beatmap.version = '" << beatmap.version << "'" << std::endl;
+        for (int i = 0; i <= 10; i++) {
+            const char* diffName = IIDXParser::getDifficultyName(i);
+            std::cout << "[IIDX DEBUG] Comparing with [" << i << "] '" << diffName << "'" << std::endl;
+            if (beatmap.version == diffName) {
+                diffIdx = i;
+                std::cout << "[IIDX DEBUG] MATCH! diffIdx = " << diffIdx << std::endl;
+                break;
+            }
+        }
+        std::cout << "[IIDX DEBUG] Final diffIdx = " << diffIdx << std::endl;
+        parseSuccess = IIDXParser::parse(actualPath, beatmap, diffIdx);
     } else if (isMalody) {
         SET_STATUS("Parsing Malody chart...");
         parseSuccess = MalodyParser::parse(actualPath, beatmap);
@@ -1678,8 +1936,8 @@ void Game::run() {
                 if (loadingThread.joinable()) {
                     loadingThread.join();
                 }
-                // Call the synchronous loadBeatmap to do SDL operations
-                if (loadBeatmap(pendingBeatmapPath)) {
+                // Call the synchronous loadBeatmap to do SDL operations (skip parsing since async already did it)
+                if (loadBeatmap(pendingBeatmapPath, true)) {
                     if (pendingReplayMode) {
                         // Setup replay mode
                         replayMode = true;
@@ -1915,6 +2173,13 @@ void Game::handleInput() {
                 else if (e.key.key == SDLK_RETURN) {
                     if (!songList.empty() && !songSelectTransition) {
                         std::string path = songList[selectedSongIndex].beatmapFiles[selectedDifficultyIndex];
+                        std::cout << "[SONG SELECT DEBUG] selectedDifficultyIndex=" << selectedDifficultyIndex
+                                  << ", difficulties.size()=" << songList[selectedSongIndex].difficulties.size() << std::endl;
+                        // Set version for IIDX (all difficulties in same .1 file)
+                        if (selectedDifficultyIndex < (int)songList[selectedSongIndex].difficulties.size()) {
+                            beatmap.version = songList[selectedSongIndex].difficulties[selectedDifficultyIndex].version;
+                            std::cout << "[SONG SELECT DEBUG] Set beatmap.version = '" << beatmap.version << "'" << std::endl;
+                        }
                         stopPreviewMusic();
                         startAsyncLoad(path);
                     }
@@ -2805,6 +3070,10 @@ void Game::render() {
                         if (isSelected && selectedDifficultyIndex == 0) {
                             // Double click on selected song - confirm first difficulty
                             std::string path = song.beatmapFiles[0];
+                            // Set version for IIDX
+                            if (!song.difficulties.empty()) {
+                                beatmap.version = song.difficulties[0].version;
+                            }
                             stopPreviewMusic();
                             startAsyncLoad(path);
                         } else {
@@ -2836,6 +3105,7 @@ void Game::render() {
                 else if (song.source == BeatmapSource::BMS) sourceLabel = "BMS";
                 else if (song.source == BeatmapSource::Malody) sourceLabel = "Malody";
                 else if (song.source == BeatmapSource::MuSynx) sourceLabel = "MUSYNX";
+                else if (song.source == BeatmapSource::IIDX) sourceLabel = "IIDX";
                 renderer.renderTextRight(sourceLabel, 1280 - 20, y + 10);
             }
 
@@ -2855,6 +3125,10 @@ void Game::render() {
                                 if (selectedDifficultyIndex == d) {
                                     // Double click - confirm
                                     std::string path = song.beatmapFiles[d];
+                                    // Set version for IIDX
+                                    if (d < (int)song.difficulties.size()) {
+                                        beatmap.version = song.difficulties[d].version;
+                                    }
                                     stopPreviewMusic();
                                     startAsyncLoad(path);
                                 } else {
@@ -3040,8 +3314,25 @@ void Game::render() {
         float exportX = boxX + fileBoxW + 10;
         if (renderer.renderButton("Export", exportX, rowY, btnW, btnH, mouseX, mouseY, mouseClicked)) {
             if (!factoryReplayPath.empty()) {
-                // Select original or mirrored version based on checkbox
-                ReplayInfo exportInfo = factoryMirrorInput ? factoryReplayInfoMirrored : factoryReplayInfo;
+                ReplayInfo exportInfo;
+                if (factoryMirrorInput) {
+                    // Sync modifications to mirrored version before export
+                    exportInfo = factoryReplayInfoMirrored;
+                    exportInfo.playerName = factoryReplayInfo.playerName;
+                    exportInfo.mods = factoryReplayInfo.mods;
+                    exportInfo.timestamp = factoryReplayInfo.timestamp;
+                    exportInfo.count300g = factoryReplayInfo.count300g;
+                    exportInfo.count300 = factoryReplayInfo.count300;
+                    exportInfo.count200 = factoryReplayInfo.count200;
+                    exportInfo.count100 = factoryReplayInfo.count100;
+                    exportInfo.count50 = factoryReplayInfo.count50;
+                    exportInfo.countMiss = factoryReplayInfo.countMiss;
+                    exportInfo.totalScore = factoryReplayInfo.totalScore;
+                    exportInfo.maxCombo = factoryReplayInfo.maxCombo;
+                    exportInfo.beatmapHash = factoryReplayInfo.beatmapHash;
+                } else {
+                    exportInfo = factoryReplayInfo;
+                }
 
                 // Add watermark before saving
                 exportInfo.onlineScoreId = ReplayParser::createWatermark();
@@ -3347,6 +3638,7 @@ void Game::render() {
 
                         // Create output directory
                         std::filesystem::create_directories("Exports");
+                        std::filesystem::create_directories("Data/Tmp");
 
                         // Start generation
                         videoGenerator.startGeneration(factoryReplayInfo, videoBeatmap, settings, config, "Data/Tmp");
@@ -5170,6 +5462,64 @@ void Game::scanSongsFolder() {
 
                 song.beatmapFiles.push_back(diff.path);
                 song.difficulties.push_back(diff);
+            } else if (ext == ".1") {
+                // beatmania IIDX chart file
+                song.source = BeatmapSource::IIDX;
+
+                // Extract song ID from filename (e.g., "32083.1" -> 32083)
+                std::string stem = file.path().stem().string();
+                int songId = 0;
+                try {
+                    songId = std::stoi(stem);
+                } catch (...) {
+                    songId = 0;
+                }
+
+                // Look up song info from database
+                static auto iidxDB = getIIDXSongDB();
+                auto it = iidxDB.find(songId);
+                if (it != iidxDB.end()) {
+                    song.title = it->second.title;
+                    song.artist = it->second.artist;
+                } else {
+                    song.title = stem;
+                    song.artist = "Unknown";
+                }
+
+                try {
+                    std::cout << "[IIDX] Scanning: " << file.path().string() << std::endl;
+                    auto availDiffs = IIDXParser::getAvailableDifficulties(file.path().string());
+                    std::cout << "[IIDX] Found " << availDiffs.size() << " difficulties" << std::endl;
+
+                    for (int diffIdx : availDiffs) {
+                        DifficultyInfo diff;
+                        diff.path = file.path().string();
+                        diff.keyCount = (diffIdx >= 5) ? 16 : 8;  // DP = 16, SP = 8
+                        diff.version = IIDXParser::getDifficultyName(diffIdx);
+
+                        std::cout << "[IIDX] Parsing difficulty: " << diff.version << std::endl;
+
+                        // Parse to get note count for star rating
+                        BeatmapInfo tempInfo;
+                        if (IIDXParser::parse(diff.path, tempInfo, diffIdx)) {
+                            std::cout << "[IIDX] Calculating star rating..." << std::endl;
+                            diff.starRatings[0] = calculateStarRating(tempInfo.notes, diff.keyCount,
+                                StarRatingVersion::OsuStable_b20260101);
+                            diff.starRatings[1] = calculateStarRating(tempInfo.notes, diff.keyCount,
+                                StarRatingVersion::OsuStable_b20220101);
+                            std::cout << "[IIDX] Star rating done" << std::endl;
+                        }
+
+                        song.beatmapFiles.push_back(diff.path);
+                        song.difficulties.push_back(diff);
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "[IIDX] Exception: " << e.what() << std::endl;
+                    continue;
+                } catch (...) {
+                    std::cerr << "[IIDX] Unknown exception" << std::endl;
+                    continue;
+                }
             } else if (ext == ".mc") {
                 // Malody chart - only Key mode (mode=0) is supported
                 BeatmapInfo tempInfo;

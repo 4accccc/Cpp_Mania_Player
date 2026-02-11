@@ -1,7 +1,11 @@
 #include "KeySoundManager.h"
 #include "AudioManager.h"
+#include "S3PParser.h"
+#include "2dxSoundParser.h"
 #include <filesystem>
 #include <algorithm>
+#include <fstream>
+#include <iostream>
 #include <SDL3/SDL.h>
 
 namespace fs = std::filesystem;
@@ -82,6 +86,75 @@ int KeySoundManager::loadSample(const std::string& filename) {
     return handle;
 }
 
+bool KeySoundManager::loadS3PSamples(const std::string& s3pPath) {
+    if (!audioManager) return false;
+
+    std::vector<S3PParser::Sample> samples;
+    if (!S3PParser::parse(s3pPath, samples)) {
+        return false;
+    }
+
+    std::ifstream file(s3pPath, std::ios::binary);
+    if (!file) return false;
+
+    s3pSampleCache.clear();
+
+    for (size_t i = 0; i < samples.size(); i++) {
+        const auto& sample = samples[i];
+        if (sample.waveSize <= 0) continue;
+
+        std::vector<uint8_t> waveData(sample.waveSize);
+        file.seekg(sample.waveOffset, std::ios::beg);
+        file.read(reinterpret_cast<char*>(waveData.data()), sample.waveSize);
+
+        int handle = audioManager->loadSampleFromMemory(waveData.data(), waveData.size());
+        if (handle >= 0) {
+            // Sample IDs in chart files are 1-based, so store with i+1
+            s3pSampleCache[static_cast<int>(i) + 1] = handle;
+        }
+    }
+
+    std::cout << "KeySoundManager: Loaded " << s3pSampleCache.size()
+              << " samples from S3P" << std::endl;
+    return true;
+}
+
+bool KeySoundManager::load2DXSamples(const std::string& twoDxPath) {
+    if (!audioManager) return false;
+
+    std::vector<TwoDxParser::Sample> samples;
+    if (!TwoDxParser::parse(twoDxPath, samples)) {
+        return false;
+    }
+
+    std::ifstream file(twoDxPath, std::ios::binary);
+    if (!file) return false;
+
+    // Don't clear cache - may have S3P samples loaded already
+    // s3pSampleCache.clear();
+
+    int loadedCount = 0;
+    for (size_t i = 0; i < samples.size(); i++) {
+        const auto& sample = samples[i];
+        if (sample.waveSize <= 0) continue;
+
+        std::vector<uint8_t> waveData(sample.waveSize);
+        file.seekg(sample.waveOffset, std::ios::beg);
+        file.read(reinterpret_cast<char*>(waveData.data()), sample.waveSize);
+
+        int handle = audioManager->loadSampleFromMemory(waveData.data(), waveData.size());
+        if (handle >= 0) {
+            // Sample IDs in chart files are 1-based
+            s3pSampleCache[static_cast<int>(i) + 1] = handle;
+            loadedCount++;
+        }
+    }
+
+    std::cout << "KeySoundManager: Loaded " << loadedCount
+              << " samples from 2DX" << std::endl;
+    return loadedCount > 0;
+}
+
 void KeySoundManager::preloadKeySounds(std::vector<Note>& notes) {
     for (auto& note : notes) {
         // Load head/normal key sound
@@ -103,6 +176,14 @@ void KeySoundManager::playKeySound(const Note& note, bool isTail) {
     int volume = isTail ? note.tailVolume : note.volume;
     const std::string& filename = isTail ? note.tailFilename : note.filename;
 
+    // Try S3P sample cache first (IIDX format uses customIndex)
+    if (handle == -1 && note.customIndex >= 0) {
+        auto it = s3pSampleCache.find(note.customIndex);
+        if (it != s3pSampleCache.end()) {
+            handle = it->second;
+        }
+    }
+
     // If handle is -1 but filename exists, try to load from cache
     if (handle == -1 && !filename.empty()) {
         handle = loadSample(filename);
@@ -123,6 +204,7 @@ void KeySoundManager::playKeySound(const Note& note, bool isTail) {
 
 void KeySoundManager::clear() {
     sampleCache.clear();
+    s3pSampleCache.clear();
     // Note: actual audio data is managed by AudioManager
 }
 
@@ -138,6 +220,14 @@ void KeySoundManager::playStoryboardSample(const StoryboardSample& sample) {
     if (!audioManager) return;
 
     int handle = sample.sampleHandle;
+
+    // Try S3P sample cache first (IIDX format uses customIndex)
+    if (handle == -1 && sample.customIndex >= 0) {
+        auto it = s3pSampleCache.find(sample.customIndex);
+        if (it != s3pSampleCache.end()) {
+            handle = it->second;
+        }
+    }
 
     // If handle is -1 but filename exists, try to load from cache
     if (handle == -1 && !sample.filename.empty()) {

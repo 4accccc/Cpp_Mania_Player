@@ -635,7 +635,8 @@ void Renderer::renderNoteLighting(const bool* laneHoldActive, int count, int64_t
         if (laneHoldActive && laneHoldActive[i]) {
             int frameCount = skinManager->getLightingLFrameCount(keyCount);
             if (frameCount > 0) {
-                float frameInterval = skinManager->getLightingFrameInterval(frameCount);
+                // Frame interval: max(170ms/frameCount, 16.67ms)
+                float frameInterval = std::max(170.0f / frameCount, 16.67f);
                 int frame = (int)(currentTime / frameInterval) % frameCount;
                 if (frame < 0) frame = 0;
 
@@ -643,6 +644,11 @@ void Renderer::renderNoteLighting(const bool* laneHoldActive, int count, int64_t
                 if (tex) {
                     float texW, texH;
                     SDL_GetTextureSize(tex, &texW, &texH);
+
+                    // Apply @2x scale adjust
+                    float scaleAdj = skinManager->getTextureScaleAdjust(tex);
+                    texW /= scaleAdj;
+                    texH /= scaleAdj;
 
                     // Calculate scale: (LightingLWidth or ColumnWidth) / 30
                     float lightingWidth = columnWidth;
@@ -663,13 +669,14 @@ void Renderer::renderNoteLighting(const bool* laneHoldActive, int count, int64_t
                 }
             }
         }
-        // Check if LightingN animation is active (plays once, 170ms total)
+        // Check if LightingN animation is active (plays once with fade out)
         else {
             int64_t elapsed = currentTime - lightingNHitTime[i];
-            if (elapsed >= 0 && elapsed < 170) {
+            if (elapsed >= 0 && elapsed < 200) {  // Extended to 200ms for fade out
                 int frameCount = skinManager->getLightingNFrameCount(keyCount);
                 if (frameCount > 0) {
-                    float frameInterval = skinManager->getLightingFrameInterval(frameCount);
+                    // Frame interval: max(170ms/frameCount, 16.67ms)
+                    float frameInterval = std::max(170.0f / frameCount, 16.67f);
                     int frame = (int)(elapsed / frameInterval);
                     if (frame >= frameCount) frame = frameCount - 1;
 
@@ -677,6 +684,11 @@ void Renderer::renderNoteLighting(const bool* laneHoldActive, int count, int64_t
                     if (tex) {
                         float texW, texH;
                         SDL_GetTextureSize(tex, &texW, &texH);
+
+                        // Apply @2x scale adjust
+                        float scaleAdj = skinManager->getTextureScaleAdjust(tex);
+                        texW /= scaleAdj;
+                        texH /= scaleAdj;
 
                         // Calculate scale: (LightingNWidth or ColumnWidth) / 30
                         float lightingWidth = columnWidth;
@@ -688,11 +700,21 @@ void Renderer::renderNoteLighting(const bool* laneHoldActive, int count, int64_t
                         float lightW = texW * lightScale;
                         float lightH = texH * lightScale;
 
+                        // Calculate alpha for fade out (starts at 80ms, completes at 200ms)
+                        Uint8 alpha = 255;
+                        if (elapsed >= 80) {
+                            float fadeProgress = (float)(elapsed - 80) / 120.0f;  // 120ms fade duration
+                            if (fadeProgress > 1.0f) fadeProgress = 1.0f;
+                            alpha = (Uint8)(255 * (1.0f - fadeProgress));
+                        }
+
                         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_ADD);
-                        SDL_SetTextureColorMod(tex, 255, 255, 255);  // Keep original color
+                        SDL_SetTextureAlphaMod(tex, alpha);
+                        SDL_SetTextureColorMod(tex, 255, 255, 255);
 
                         SDL_FRect dst = { centerX - lightW / 2, lightY - lightH / 2, lightW, lightH };
                         SDL_RenderTexture(renderer, tex, nullptr, &dst);
+                        SDL_SetTextureAlphaMod(tex, 255);  // Reset alpha
                         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
                     }
                 }
@@ -2078,7 +2100,7 @@ void Renderer::renderMenu() {
         SDL_DestroySurface(s);
     }
 
-    const char* version = "Version 0.0.5b";
+    const char* version = "Version 0.0.5";
     s = TTF_RenderText_Blended(font, version, strlen(version), white);
     if (s) {
         SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);

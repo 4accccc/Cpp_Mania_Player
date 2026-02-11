@@ -283,10 +283,11 @@ bool VideoGenerator::muxAudio() {
         return false;
     }
 
-    // Check if audio file exists
+    // Check if audio file exists - if not, just copy video without audio
     if (!fs::exists(config_.audioPath)) {
-        errorMessage_ = "Audio file not found: " + config_.audioPath;
-        return false;
+        // No audio file, just rename temp video to output
+        fs::rename(tempVideoPath_, outputPath_);
+        return true;
     }
 
     // If clock rate != 1.0, we need to adjust audio speed using ffmpeg command

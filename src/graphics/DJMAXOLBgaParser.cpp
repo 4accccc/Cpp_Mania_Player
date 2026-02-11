@@ -6,6 +6,7 @@
 #include <vector>
 #include <algorithm>
 
+// DJMAX OL BGA Disabled temporarily due to some technical issues.
 namespace fs = std::filesystem;
 
 // CRC32 lookup table (standard polynomial)

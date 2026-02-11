@@ -2,6 +2,7 @@
 ### A cross-platform(in planned) rhythm game. Written in C++/SDL3.
 
 ## Features
+
 - Read other rhythm game's charts
 - Play keysounds
 - Support osu's storyboard
@@ -9,6 +10,8 @@
 - Can Read / Write / Edit osu! replay files [*.osr]
 
 ## Support Chart formats
+
+- Beatmania IIDX [*.1]
 - Be-Music Script [*.bms]
 - DJMAX RESPECT [*.bytes]
 - DJMAX ONLINE [*.pt]
@@ -21,8 +24,9 @@
 
 - EZ2DJ/EZ2ON
 - Stepmania
-- Beatmania IIDX
+- More...
 
+## Tutorial: [How to add songs?](https://github.com/4accccc/Cpp_Mania_Player/wiki/Songs-folder-structure)
 ## Dependencies
 
 This project uses the following third-party libraries:
@@ -154,6 +158,18 @@ This project uses the following third-party libraries:
 - 新增加载界面，支持在加载过程中使用esc打断加载
 - 新增 osu! 皮肤高分辨率图片资源(*@2x)读取
 - 新增 MUSYNX 谱面，key音读取
+
+
+
+### Mania Player v0.0.5
+
+- 修复特殊情况下KeyImage被按下无法自动恢复的问题
+- 修复 DJMAX RESPECT, DJMAX ONLINE, O2Jam, MUSYNX, BMS key 音无法正常加载的问题
+- 修复 osu! 皮肤高分辨率图片资源读取时比例出现异常的问题
+- 修复 osu! 皮肤部分元件动画速率异常的问题
+- 修复 Replay Factory 回放导出功能失效的问题
+- 修复对无背景音乐的谱面进行 Replay 可视化视频输出时报错的问题
+- 新增 Beatmania IIDX 谱面，key音读取 (由于版权原因，我不会告诉你如何下载谱面文件)
 
 
 

@@ -33,6 +33,7 @@ public:
 
     // Sample (key sound) support
     int loadSample(const std::string& filepath);
+    int loadSampleFromMemory(const void* data, size_t size);
     void playSample(int handle, int volume = 100);
     void pauseAllSamples();
     void resumeAllSamples();
