@@ -62,4 +62,9 @@ private:
     // Sample cache: handle -> HSAMPLE
     std::unordered_map<int, HSAMPLE> sampleCache;
     int nextSampleHandle;
+
+#ifndef _WIN32
+    // Linux: FFmpeg transcoding for unsupported formats
+    HSAMPLE loadSampleWithFFmpeg(const void* data, size_t size);
+#endif
 };

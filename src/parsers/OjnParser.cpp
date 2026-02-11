@@ -122,6 +122,19 @@ std::string OjnParser::extractCover(const std::string& filepath) {
         return "";
     }
 
+    // Generate output path (same directory as OJN, with _cover.jpg suffix)
+    std::string outPath = filepath;
+    size_t dotPos = outPath.rfind('.');
+    if (dotPos != std::string::npos) {
+        outPath = outPath.substr(0, dotPos);
+    }
+    outPath += "_cover.jpg";
+
+    // Skip if already extracted
+    if (std::ifstream(outPath).good()) {
+        return outPath;
+    }
+
     std::ifstream file(filepath, std::ios::binary);
     if (!file) return "";
 
@@ -133,14 +146,6 @@ std::string OjnParser::extractCover(const std::string& filepath) {
     file.read(coverData.data(), header.coverSize);
 
     if (!file.good()) return "";
-
-    // Generate output path (same directory as OJN, with _cover.jpg suffix)
-    std::string outPath = filepath;
-    size_t dotPos = outPath.rfind('.');
-    if (dotPos != std::string::npos) {
-        outPath = outPath.substr(0, dotPos);
-    }
-    outPath += "_cover.jpg";
 
     // Write cover to file
     std::ofstream outFile(outPath, std::ios::binary);

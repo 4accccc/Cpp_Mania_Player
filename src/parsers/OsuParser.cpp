@@ -1,49 +1,14 @@
 #include "OsuParser.h"
+#include "MD5.h"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
 #include <iomanip>
+#include <cmath>
 #include <SDL3/SDL.h>
-#ifdef _WIN32
-#define NOMINMAX
-#include <windows.h>
-#include <wincrypt.h>
-#endif
 
 std::string OsuParser::calculateMD5(const std::string& filepath) {
-#ifdef _WIN32
-    std::ifstream file(filepath, std::ios::binary);
-    if (!file) return "";
-
-    std::vector<char> buffer((std::istreambuf_iterator<char>(file)),
-                              std::istreambuf_iterator<char>());
-    file.close();
-
-    HCRYPTPROV hProv = 0;
-    HCRYPTHASH hHash = 0;
-    std::string result;
-
-    if (CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
-        if (CryptCreateHash(hProv, CALG_MD5, 0, 0, &hHash)) {
-            if (CryptHashData(hHash, (BYTE*)buffer.data(), buffer.size(), 0)) {
-                BYTE hash[16];
-                DWORD hashLen = 16;
-                if (CryptGetHashParam(hHash, HP_HASHVAL, hash, &hashLen, 0)) {
-                    std::ostringstream oss;
-                    for (int i = 0; i < 16; i++) {
-                        oss << std::hex << std::setfill('0') << std::setw(2) << (int)hash[i];
-                    }
-                    result = oss.str();
-                }
-            }
-            CryptDestroyHash(hHash);
-        }
-        CryptReleaseContext(hProv, 0);
-    }
-    return result;
-#else
-    return "";
-#endif
+    return MD5::hashFile(filepath);
 }
 
 std::string OsuParser::trim(const std::string& str) {
@@ -360,11 +325,6 @@ bool OsuParser::parse(const std::string& filepath, BeatmapInfo& info) {
                     info.notes.back().volume = vol;
                     info.notes.back().filename = fn;
 
-                    // Debug: log sampleSet parsing
-                    if (ss != SampleSet::None) {
-                        SDL_Log("OsuParser: Note time=%lld x=%d sampleSet=%d extras=%s",
-                                (long long)time, x, (int)ss, extras.c_str());
-                    }
                 }
 
                 // Check if fake note should have fixed position

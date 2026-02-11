@@ -1,7 +1,20 @@
 #include "AudioManager.h"
 #include <iostream>
 #include <algorithm>
+#include <cmath>
 #include <SDL3/SDL.h>
+
+#ifndef _WIN32
+#include <fstream>
+#include <filesystem>
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libswresample/swresample.h>
+#include <libavutil/opt.h>
+}
+namespace fs = std::filesystem;
+#endif
 
 AudioManager::AudioManager()
     : decodeStream(0), tempoStream(0), initialized(false),
@@ -205,6 +218,14 @@ int AudioManager::loadSampleFromMemory(const void* data, size_t size) {
     if (!initialized || !data || size == 0) return -1;
 
     HSAMPLE sample = BASS_SampleLoad(TRUE, data, 0, static_cast<DWORD>(size), 65535, BASS_SAMPLE_OVER_POS);
+
+#ifndef _WIN32
+    // Linux: if BASS fails with format error, try FFmpeg transcoding
+    if (!sample && BASS_ErrorGetCode() == BASS_ERROR_FILEFORM) {
+        sample = loadSampleWithFFmpeg(data, size);
+    }
+#endif
+
     if (!sample) {
         std::cerr << "BASS_SampleLoad (memory) failed: " << BASS_ErrorGetCode() << std::endl;
         return -1;
@@ -352,3 +373,147 @@ void AudioManager::setChangePitch(bool change) {
 bool AudioManager::getChangePitch() const {
     return changePitch;
 }
+
+#ifndef _WIN32
+HSAMPLE AudioManager::loadSampleWithFFmpeg(const void* data, size_t size) {
+    // Write to temp file (FFmpeg needs file input for memory buffer workaround)
+    fs::path tempDir = fs::current_path() / "Data" / "Tmp" / "ffmpeg";
+    fs::create_directories(tempDir);
+
+    static int tempCounter = 0;
+    std::string inputPath = (tempDir / ("in_" + std::to_string(tempCounter++) + ".wav")).string();
+
+    {
+        std::ofstream out(inputPath, std::ios::binary);
+        if (!out) return 0;
+        out.write(static_cast<const char*>(data), size);
+    }
+
+    // Open input
+    AVFormatContext* fmtCtx = nullptr;
+    if (avformat_open_input(&fmtCtx, inputPath.c_str(), nullptr, nullptr) < 0) {
+        fs::remove(inputPath);
+        return 0;
+    }
+
+    if (avformat_find_stream_info(fmtCtx, nullptr) < 0) {
+        avformat_close_input(&fmtCtx);
+        fs::remove(inputPath);
+        return 0;
+    }
+
+    // Find audio stream
+    int audioIdx = -1;
+    for (unsigned i = 0; i < fmtCtx->nb_streams; i++) {
+        if (fmtCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            audioIdx = i;
+            break;
+        }
+    }
+
+    if (audioIdx < 0) {
+        avformat_close_input(&fmtCtx);
+        fs::remove(inputPath);
+        return 0;
+    }
+
+    AVCodecParameters* codecPar = fmtCtx->streams[audioIdx]->codecpar;
+    const AVCodec* codec = avcodec_find_decoder(codecPar->codec_id);
+    if (!codec) {
+        avformat_close_input(&fmtCtx);
+        fs::remove(inputPath);
+        return 0;
+    }
+
+    AVCodecContext* codecCtx = avcodec_alloc_context3(codec);
+    avcodec_parameters_to_context(codecCtx, codecPar);
+    if (avcodec_open2(codecCtx, codec, nullptr) < 0) {
+        avcodec_free_context(&codecCtx);
+        avformat_close_input(&fmtCtx);
+        fs::remove(inputPath);
+        return 0;
+    }
+
+    // Setup resampler to convert to S16 stereo 44100Hz
+    SwrContext* swr = swr_alloc();
+    AVChannelLayout outLayout = AV_CHANNEL_LAYOUT_STEREO;
+    AVChannelLayout inLayout;
+    av_channel_layout_copy(&inLayout, &codecCtx->ch_layout);
+
+    swr_alloc_set_opts2(&swr, &outLayout, AV_SAMPLE_FMT_S16, 44100,
+                        &inLayout, codecCtx->sample_fmt, codecCtx->sample_rate, 0, nullptr);
+    swr_init(swr);
+
+    // Decode and resample
+    std::vector<uint8_t> pcmData;
+    AVPacket* pkt = av_packet_alloc();
+    AVFrame* frame = av_frame_alloc();
+
+    while (av_read_frame(fmtCtx, pkt) >= 0) {
+        if (pkt->stream_index == audioIdx) {
+            if (avcodec_send_packet(codecCtx, pkt) >= 0) {
+                while (avcodec_receive_frame(codecCtx, frame) >= 0) {
+                    int outSamples = swr_get_out_samples(swr, frame->nb_samples);
+                    std::vector<uint8_t> outBuf(outSamples * 4); // stereo S16 = 4 bytes/sample
+                    uint8_t* outPtr = outBuf.data();
+                    int converted = swr_convert(swr, &outPtr, outSamples,
+                                               (const uint8_t**)frame->data, frame->nb_samples);
+                    if (converted > 0) {
+                        pcmData.insert(pcmData.end(), outBuf.begin(), outBuf.begin() + converted * 4);
+                    }
+                }
+            }
+        }
+        av_packet_unref(pkt);
+    }
+
+    // Flush
+    swr_convert(swr, nullptr, 0, nullptr, 0);
+
+    av_frame_free(&frame);
+    av_packet_free(&pkt);
+    swr_free(&swr);
+    av_channel_layout_uninit(&inLayout);
+    avcodec_free_context(&codecCtx);
+    avformat_close_input(&fmtCtx);
+    fs::remove(inputPath);
+
+    if (pcmData.empty()) return 0;
+
+    // Build WAV header
+    std::vector<uint8_t> wavData;
+    uint32_t dataSize = pcmData.size();
+    uint32_t fileSize = 36 + dataSize;
+
+    // RIFF header
+    wavData.insert(wavData.end(), {'R', 'I', 'F', 'F'});
+    wavData.insert(wavData.end(), (uint8_t*)&fileSize, (uint8_t*)&fileSize + 4);
+    wavData.insert(wavData.end(), {'W', 'A', 'V', 'E'});
+
+    // fmt chunk
+    wavData.insert(wavData.end(), {'f', 'm', 't', ' '});
+    uint32_t fmtSize = 16;
+    wavData.insert(wavData.end(), (uint8_t*)&fmtSize, (uint8_t*)&fmtSize + 4);
+    uint16_t audioFormat = 1; // PCM
+    wavData.insert(wavData.end(), (uint8_t*)&audioFormat, (uint8_t*)&audioFormat + 2);
+    uint16_t numChannels = 2;
+    wavData.insert(wavData.end(), (uint8_t*)&numChannels, (uint8_t*)&numChannels + 2);
+    uint32_t sampleRate = 44100;
+    wavData.insert(wavData.end(), (uint8_t*)&sampleRate, (uint8_t*)&sampleRate + 4);
+    uint32_t byteRate = 44100 * 2 * 2;
+    wavData.insert(wavData.end(), (uint8_t*)&byteRate, (uint8_t*)&byteRate + 4);
+    uint16_t blockAlign = 4;
+    wavData.insert(wavData.end(), (uint8_t*)&blockAlign, (uint8_t*)&blockAlign + 2);
+    uint16_t bitsPerSample = 16;
+    wavData.insert(wavData.end(), (uint8_t*)&bitsPerSample, (uint8_t*)&bitsPerSample + 2);
+
+    // data chunk
+    wavData.insert(wavData.end(), {'d', 'a', 't', 'a'});
+    wavData.insert(wavData.end(), (uint8_t*)&dataSize, (uint8_t*)&dataSize + 4);
+    wavData.insert(wavData.end(), pcmData.begin(), pcmData.end());
+
+    // Load with BASS
+    HSAMPLE sample = BASS_SampleLoad(TRUE, wavData.data(), 0, wavData.size(), 65535, BASS_SAMPLE_OVER_POS);
+    return sample;
+}
+#endif

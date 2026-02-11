@@ -626,6 +626,26 @@ std::string Storyboard::findImageFile(const std::string& baseName) const {
         "", ".png", ".jpg", ".jpeg", ".bmp", ".gif"
     };
 
+    // Check if baseName is already an absolute path
+    fs::path basePath(baseName);
+    if (basePath.is_absolute()) {
+        // Try the path directly first
+        if (fs::exists(basePath)) {
+            return baseName;
+        }
+        // Try with different extensions
+        for (const auto& ext : extensions) {
+            if (ext.empty()) continue;
+            fs::path pathWithExt = basePath;
+            pathWithExt.replace_extension(ext);
+            if (fs::exists(pathWithExt)) {
+                return pathWithExt.string();
+            }
+        }
+        return "";
+    }
+
+    // Relative path - search in beatmapDir
     for (const auto& ext : extensions) {
         fs::path path = fs::path(beatmapDir) / (baseName + ext);
         if (fs::exists(path)) {
