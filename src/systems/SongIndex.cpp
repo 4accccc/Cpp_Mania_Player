@@ -6,7 +6,7 @@
 namespace fs = std::filesystem;
 
 // Index file version (increment when format changes)
-static const int INDEX_VERSION = 6;
+static const int INDEX_VERSION = 7;
 
 std::string SongIndex::getIndexDir() {
     return (fs::path("Data") / "Index").string();
@@ -95,9 +95,13 @@ bool SongIndex::loadIndex(const std::string& folderPath, CachedSong& song) {
     song.folderPath = readString(f);
     song.folderName = readString(f);
     song.title = readString(f);
+    song.titleUnicode = readString(f);
     song.artist = readString(f);
+    song.artistUnicode = readString(f);
     song.backgroundPath = readString(f);
     song.audioPath = readString(f);
+    song.sourceText = readString(f);
+    song.tags = readString(f);
     f.read(reinterpret_cast<char*>(&song.previewTime), sizeof(song.previewTime));
     f.read(reinterpret_cast<char*>(&song.source), sizeof(song.source));
 
@@ -118,6 +122,15 @@ bool SongIndex::loadIndex(const std::string& folderPath, CachedSong& song) {
         f.read(reinterpret_cast<char*>(&diff.keyCount), sizeof(diff.keyCount));
         f.read(reinterpret_cast<char*>(&diff.previewTime), sizeof(diff.previewTime));
         f.read(reinterpret_cast<char*>(diff.starRatings), sizeof(diff.starRatings));
+        f.read(reinterpret_cast<char*>(&diff.totalLength), sizeof(diff.totalLength));
+        f.read(reinterpret_cast<char*>(&diff.bpmMin), sizeof(diff.bpmMin));
+        f.read(reinterpret_cast<char*>(&diff.bpmMax), sizeof(diff.bpmMax));
+        f.read(reinterpret_cast<char*>(&diff.bpmMost), sizeof(diff.bpmMost));
+        f.read(reinterpret_cast<char*>(&diff.totalObjects), sizeof(diff.totalObjects));
+        f.read(reinterpret_cast<char*>(&diff.rcCount), sizeof(diff.rcCount));
+        f.read(reinterpret_cast<char*>(&diff.lnCount), sizeof(diff.lnCount));
+        f.read(reinterpret_cast<char*>(&diff.od), sizeof(diff.od));
+        f.read(reinterpret_cast<char*>(&diff.hp), sizeof(diff.hp));
         song.difficulties.push_back(diff);
     }
 
@@ -140,9 +153,13 @@ bool SongIndex::saveIndex(const CachedSong& song) {
     writeString(f, song.folderPath);
     writeString(f, song.folderName);
     writeString(f, song.title);
+    writeString(f, song.titleUnicode);
     writeString(f, song.artist);
+    writeString(f, song.artistUnicode);
     writeString(f, song.backgroundPath);
     writeString(f, song.audioPath);
+    writeString(f, song.sourceText);
+    writeString(f, song.tags);
     f.write(reinterpret_cast<const char*>(&song.previewTime), sizeof(song.previewTime));
     f.write(reinterpret_cast<const char*>(&song.source), sizeof(song.source));
 
@@ -160,6 +177,15 @@ bool SongIndex::saveIndex(const CachedSong& song) {
         f.write(reinterpret_cast<const char*>(&diff.keyCount), sizeof(diff.keyCount));
         f.write(reinterpret_cast<const char*>(&diff.previewTime), sizeof(diff.previewTime));
         f.write(reinterpret_cast<const char*>(diff.starRatings), sizeof(diff.starRatings));
+        f.write(reinterpret_cast<const char*>(&diff.totalLength), sizeof(diff.totalLength));
+        f.write(reinterpret_cast<const char*>(&diff.bpmMin), sizeof(diff.bpmMin));
+        f.write(reinterpret_cast<const char*>(&diff.bpmMax), sizeof(diff.bpmMax));
+        f.write(reinterpret_cast<const char*>(&diff.bpmMost), sizeof(diff.bpmMost));
+        f.write(reinterpret_cast<const char*>(&diff.totalObjects), sizeof(diff.totalObjects));
+        f.write(reinterpret_cast<const char*>(&diff.rcCount), sizeof(diff.rcCount));
+        f.write(reinterpret_cast<const char*>(&diff.lnCount), sizeof(diff.lnCount));
+        f.write(reinterpret_cast<const char*>(&diff.od), sizeof(diff.od));
+        f.write(reinterpret_cast<const char*>(&diff.hp), sizeof(diff.hp));
     }
 
     return f.good();

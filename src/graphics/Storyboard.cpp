@@ -256,73 +256,82 @@ void StoryboardSprite::update(int64_t currentTime) {
     additive = false;
     visible = true;
 
-    // Pre-set initial values from first command of each type (osu! behavior)
-    // For Move commands: only pre-set if command has started (startTime <= currentTime)
-    // For other commands: always pre-set from first command's startValue
+    // Pre-set initial values from first command of each type (osu! stable behavior)
+    // All command types (including Move) pre-set from first command's startValue
+    // regardless of whether the command has started yet.
+    // Loop internal commands also participate in pre-setting.
     bool hasMove = false, hasMoveX = false, hasMoveY = false;
     bool hasScale = false, hasVScale = false, hasRotate = false;
     bool hasFade = false, hasColour = false;
 
-    for (const auto& cmd : commands) {
-        if (cmd.type == StoryboardCommandType::Loop) continue;
-
-        switch (cmd.type) {
+    auto presetFromCmd = [&](const StoryboardCommand& c) {
+        switch (c.type) {
             case StoryboardCommandType::Move:
-                // Only pre-set position if command has started
-                if (!hasMove && !hasMoveX && !hasMoveY && cmd.startTime <= currentTime) {
-                    currentX = cmd.startValue[0];
-                    currentY = cmd.startValue[1];
+                if (!hasMove && !hasMoveX && !hasMoveY) {
+                    currentX = c.startValue[0];
+                    currentY = c.startValue[1];
                     hasMove = true;
                 }
                 break;
             case StoryboardCommandType::MoveX:
-                if (!hasMove && !hasMoveX && cmd.startTime <= currentTime) {
-                    currentX = cmd.startValue[0];
+                if (!hasMove && !hasMoveX) {
+                    currentX = c.startValue[0];
                     hasMoveX = true;
                 }
                 break;
             case StoryboardCommandType::MoveY:
-                if (!hasMove && !hasMoveY && cmd.startTime <= currentTime) {
-                    currentY = cmd.startValue[0];
+                if (!hasMove && !hasMoveY) {
+                    currentY = c.startValue[0];
                     hasMoveY = true;
                 }
                 break;
             case StoryboardCommandType::Scale:
                 if (!hasScale && !hasVScale) {
-                    currentScaleX = currentScaleY = cmd.startValue[0];
+                    currentScaleX = currentScaleY = c.startValue[0];
                     hasScale = true;
                 }
                 break;
             case StoryboardCommandType::VectorScale:
                 if (!hasScale && !hasVScale) {
-                    currentScaleX = cmd.startValue[0];
-                    currentScaleY = cmd.startValue[1];
+                    currentScaleX = c.startValue[0];
+                    currentScaleY = c.startValue[1];
                     hasVScale = true;
                 }
                 break;
             case StoryboardCommandType::Rotate:
                 if (!hasRotate) {
-                    currentRotation = cmd.startValue[0];
+                    currentRotation = c.startValue[0];
                     hasRotate = true;
                 }
                 break;
             case StoryboardCommandType::Fade:
                 if (!hasFade) {
-                    currentOpacity = cmd.startValue[0];
+                    currentOpacity = c.startValue[0];
                     hasFade = true;
                 }
                 break;
             case StoryboardCommandType::Colour:
                 if (!hasColour) {
-                    currentR = (uint8_t)cmd.startValue[0];
-                    currentG = (uint8_t)cmd.startValue[1];
-                    currentB = (uint8_t)cmd.startValue[2];
+                    currentR = (uint8_t)c.startValue[0];
+                    currentG = (uint8_t)c.startValue[1];
+                    currentB = (uint8_t)c.startValue[2];
                     hasColour = true;
                 }
                 break;
             default:
                 break;
         }
+    };
+
+    for (const auto& cmd : commands) {
+        if (cmd.type == StoryboardCommandType::Loop) {
+            // Scan loop's internal commands for initial values too
+            for (const auto& lc : cmd.loopCommands) {
+                presetFromCmd(lc);
+            }
+            continue;
+        }
+        presetFromCmd(cmd);
     }
 
     // Now process commands normally

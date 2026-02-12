@@ -141,12 +141,14 @@ void VideoPlayer::update(int64_t currentTime) {
     // Convert milliseconds to PTS
     int64_t targetPts = startTime_ + static_cast<int64_t>(currentTime / (timeBase_ * 1000.0));
 
-    // Decode frames until we reach the target time
-    while (currentPts_ < targetPts && !finished_) {
+    // Decode frames until we reach the target time (max 5 frames per call to avoid blocking)
+    int framesDecoded = 0;
+    while (currentPts_ < targetPts && !finished_ && framesDecoded < 5) {
         if (!decodeFrame()) {
             finished_ = true;
             break;
         }
+        framesDecoded++;
     }
 }
 
@@ -161,7 +163,13 @@ bool VideoPlayer::decodeFrame() {
 
             ret = avcodec_receive_frame(codecCtx_, frame_);
             if (ret == 0) {
-                currentPts_ = frame_->pts;
+                // Use best_effort_timestamp which handles missing PTS in AVI files
+                int64_t pts = frame_->best_effort_timestamp;
+                if (pts == AV_NOPTS_VALUE) {
+                    // Fallback: estimate PTS from frame count
+                    pts = currentPts_ + static_cast<int64_t>(1.0 / (timeBase_ * 30.0));
+                }
+                currentPts_ = pts;
                 convertFrame();
                 av_packet_unref(packet_);
                 return true;

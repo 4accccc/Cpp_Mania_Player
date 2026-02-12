@@ -238,6 +238,7 @@ bool OjnParser::parse(const std::string& filepath, BeatmapInfo& info,
 
     // Read packages
     int packageCount = header.packageCount[diffIdx];
+    if (packageCount < 0 || packageCount > 100000) return false;  // Sanity limit
     for (int pkg = 0; pkg < packageCount; pkg++) {
         // Package header: measure(4) + channel(2) + eventCount(2)
         int32_t measure;
@@ -249,27 +250,33 @@ bool OjnParser::parse(const std::string& filepath, BeatmapInfo& info,
         file.read(reinterpret_cast<char*>(&eventCount), 2);
 
         if (!file.good()) break;
+        if (eventCount < 0 || eventCount > 10000) continue;  // Skip corrupted package
 
         // Read events for this package
         for (int evt = 0; evt < eventCount; evt++) {
+            // Read raw 4 bytes first, then interpret based on channel type
+            // BPM events store a float across all 4 bytes;
+            // note events use: sampleId(2) + pan(1) + noteType(1)
+            char eventData[4];
+            file.read(eventData, 4);
+
             int16_t sampleId;
             int8_t pan;
             int8_t noteType;
-
-            file.read(reinterpret_cast<char*>(&sampleId), 2);
-            file.read(reinterpret_cast<char*>(&pan), 1);
-            file.read(reinterpret_cast<char*>(&noteType), 1);
+            memcpy(&sampleId, eventData, 2);
+            memcpy(&pan, eventData + 2, 1);
+            memcpy(&noteType, eventData + 3, 1);
 
             // Calculate position in ticks
             int position = (evt * 192) / eventCount;
             int totalTicks = measure * 192 + position;
 
             // Channel 0: measure marker (skip)
-            // Channel 1: BPM change
-            if (channel == 1 && sampleId != 0) {
+            // Channel 1: BPM change (4 bytes = float BPM value)
+            if (channel == 1) {
                 float newBpm;
-                memcpy(&newBpm, &sampleId, sizeof(float));
-                if (newBpm > 0) {
+                memcpy(&newBpm, eventData, sizeof(float));
+                if (newBpm > 0 && std::isfinite(newBpm)) {
                     bpmChanges.push_back({totalTicks, newBpm});
                 }
                 continue;

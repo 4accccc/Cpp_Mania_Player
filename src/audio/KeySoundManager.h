@@ -30,11 +30,11 @@ public:
     // Preload storyboard samples
     void preloadStoryboardSamples(std::vector<StoryboardSample>& samples);
 
-    // Play key sound for a note
+    // Play key sound for a note (stops previous keysound on same lane)
     void playKeySound(const Note& note, bool isTail = false);
 
     // Play a storyboard sample
-    void playStoryboardSample(const StoryboardSample& sample);
+    void playStoryboardSample(const StoryboardSample& sample, int64_t offsetMs = 0);
 
     // Clear all loaded samples
     void clear();
@@ -60,4 +60,7 @@ private:
 
     // Helper: find audio file with various extensions
     std::string findAudioFile(const std::string& baseName);
+
+    // Helper: construct osu! hitsound filename from sampleSet + hitSound + customIndex
+    static std::string constructHitsoundName(SampleSet ss, const char* hitType, int customIndex);
 };

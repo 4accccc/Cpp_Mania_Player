@@ -11,7 +11,8 @@
 namespace fs = std::filesystem;
 
 KeySoundManager::KeySoundManager()
-    : audioManager(nullptr), timingPointVolume(100) {}
+    : audioManager(nullptr), timingPointVolume(100) {
+}
 
 KeySoundManager::~KeySoundManager() {
     clear();
@@ -155,11 +156,45 @@ bool KeySoundManager::load2DXSamples(const std::string& twoDxPath) {
     return loadedCount > 0;
 }
 
+std::string KeySoundManager::constructHitsoundName(SampleSet ss, const char* hitType, int customIndex) {
+    const char* setName = "normal";
+    if (ss == SampleSet::Soft) setName = "soft";
+    else if (ss == SampleSet::Drum) setName = "drum";
+    // Construct: {setName}-{hitType}{customIndex}
+    std::string name = std::string(setName) + "-" + hitType;
+    if (customIndex > 1) {
+        name += std::to_string(customIndex);
+    }
+    return name;
+}
+
 void KeySoundManager::preloadKeySounds(std::vector<Note>& notes) {
     for (auto& note : notes) {
         // Load head/normal key sound
         if (!note.filename.empty()) {
             note.sampleHandle = loadSample(note.filename);
+        } else if (note.customIndex > 0 && note.sampleHandle < 0) {
+            // osu! hitsound: construct filename from sampleSet + hitSound flags + customIndex
+            // Each active hitSound bit maps to a separate file
+            SampleSet ss = (note.sampleSet != SampleSet::None) ? note.sampleSet : SampleSet::Normal;
+            SampleSet addSs = (note.additions != SampleSet::None) ? note.additions : ss;
+
+            // hitnormal always uses main sampleSet
+            note.sampleHandle = loadSample(constructHitsoundName(ss, "hitnormal", note.customIndex));
+
+            // Additional sounds use additions sampleSet
+            if (note.hasWhistle) {
+                int h = loadSample(constructHitsoundName(addSs, "hitwhistle", note.customIndex));
+                if (h >= 0 && note.sampleHandle < 0) note.sampleHandle = h;
+            }
+            if (note.hasFinish) {
+                int h = loadSample(constructHitsoundName(addSs, "hitfinish", note.customIndex));
+                if (h >= 0 && note.sampleHandle < 0) note.sampleHandle = h;
+            }
+            if (note.hasClap) {
+                int h = loadSample(constructHitsoundName(addSs, "hitclap", note.customIndex));
+                if (h >= 0 && note.sampleHandle < 0) note.sampleHandle = h;
+            }
         }
 
         // Load tail key sound for hold notes
@@ -199,6 +234,7 @@ void KeySoundManager::playKeySound(const Note& note, bool isTail) {
         volume = timingPointVolume;
     }
 
+    // Play keysound (osu! stable lets keysounds overlap, no per-lane stop)
     audioManager->playSample(handle, volume);
 }
 
@@ -216,7 +252,7 @@ void KeySoundManager::preloadStoryboardSamples(std::vector<StoryboardSample>& sa
     }
 }
 
-void KeySoundManager::playStoryboardSample(const StoryboardSample& sample) {
+void KeySoundManager::playStoryboardSample(const StoryboardSample& sample, int64_t offsetMs) {
     if (!audioManager) return;
 
     int handle = sample.sampleHandle;
@@ -236,5 +272,5 @@ void KeySoundManager::playStoryboardSample(const StoryboardSample& sample) {
 
     if (handle == -1) return;
 
-    audioManager->playSample(handle, sample.volume);
+    audioManager->playSample(handle, sample.volume, offsetMs);
 }

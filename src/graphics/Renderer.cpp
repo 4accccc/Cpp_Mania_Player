@@ -2096,7 +2096,7 @@ void Renderer::renderMenu() {
         SDL_DestroySurface(s);
     }
 
-    const char* version = "Version 0.0.5";
+    const char* version = "Version 0.0.6";
     s = TTF_RenderText_Blended(font, version, strlen(version), white);
     if (s) {
         SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
@@ -2390,6 +2390,18 @@ void Renderer::renderTextClipped(const char* text, float x, float y, float maxWi
         SDL_DestroyTexture(t);
         SDL_DestroySurface(s);
     }
+}
+
+int Renderer::getTextWidth(const char* text) {
+    if (!font || !text || !text[0]) return 0;
+    SDL_Color white = {255, 255, 255, 255};
+    SDL_Surface* s = TTF_RenderText_Blended(font, text, strlen(text), white);
+    if (s) {
+        int w = s->w;
+        SDL_DestroySurface(s);
+        return w;
+    }
+    return 0;
 }
 
 void Renderer::renderLabel(const char* text, float x, float y) {

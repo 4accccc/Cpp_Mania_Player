@@ -19,6 +19,16 @@ struct CachedDifficulty {
     // Star ratings for each algorithm version:
     // [0] = b20260101, [1] = b20220101
     double starRatings[STAR_RATING_VERSION_COUNT];
+    // Metadata for header display
+    int totalLength = 0;
+    double bpmMin = 0;
+    double bpmMax = 0;
+    double bpmMost = 0;
+    int totalObjects = 0;
+    int rcCount = 0;
+    int lnCount = 0;
+    float od = 0;
+    float hp = 0;
 };
 
 // Cached song entry
@@ -26,9 +36,13 @@ struct CachedSong {
     std::string folderPath;
     std::string folderName;
     std::string title;
+    std::string titleUnicode;
     std::string artist;
+    std::string artistUnicode;
     std::string backgroundPath;
     std::string audioPath;
+    std::string sourceText;      // Source metadata (e.g. "Touhou")
+    std::string tags;            // Space-separated tags
     int previewTime;
     int source;  // 0=Osu, 1=DJMax, 2=O2Jam
     int64_t lastModified;  // Folder modification time

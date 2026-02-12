@@ -22,6 +22,7 @@
 #include "DJMAXOLBgaParser.h"
 #include "VideoGenerator.h"
 #include "JudgementSystem.h"
+#include "VideoPlayer.h"
 
 // Debug log entry for replay analysis
 struct DebugLogEntry {
@@ -66,7 +67,8 @@ enum class BeatmapSource {
     BMS,
     Malody,
     MuSynx,
-    IIDX           // beatmania IIDX (.1 files)
+    IIDX,          // beatmania IIDX (.1 files)
+    StepMania      // StepMania (.sm/.ssc files)
 };
 
 // Difficulty info for song select
@@ -83,6 +85,16 @@ struct DifficultyInfo {
     std::string backgroundPath;  // Background image path for this difficulty
     std::string audioPath;       // Audio file path for this difficulty
     int previewTime = 0;         // Preview start time in ms (-1 = 40% position)
+    // Metadata for header display
+    int totalLength = 0;         // Song length in ms (last note time)
+    double bpmMin = 0;           // Minimum BPM
+    double bpmMax = 0;           // Maximum BPM
+    double bpmMost = 0;          // Most dominant BPM (longest duration)
+    int totalObjects = 0;        // Total note count
+    int rcCount = 0;             // Regular (tap) note count
+    int lnCount = 0;             // Long note count
+    float od = 0;                // Overall Difficulty
+    float hp = 0;                // HP Drain
 };
 
 // Song entry for song select screen
@@ -90,9 +102,13 @@ struct SongEntry {
     std::string folderPath;      // Full path to song folder
     std::string folderName;      // Folder name (for display)
     std::string title;           // Song title (from beatmap)
+    std::string titleUnicode;    // Song title (Unicode version)
     std::string artist;          // Artist name (from beatmap)
+    std::string artistUnicode;   // Artist name (Unicode version)
     std::string backgroundPath;  // Path to background image
     std::string audioPath;       // Path to audio file
+    std::string sourceText;      // Source metadata (e.g. "Touhou", "Vocaloid")
+    std::string tags;            // Space-separated tags
     int previewTime;             // Preview start time in ms
     std::vector<std::string> beatmapFiles;  // List of beatmap files (legacy)
     std::vector<DifficultyInfo> difficulties;  // Detailed difficulty info
@@ -151,6 +167,10 @@ private:
     // BMS BGA
     BMSBgaManager bmsBgaManager;
     bool isBmsBga;  // true if current BGA is BMS format
+
+    // osu! background video
+    VideoPlayer osuVideoPlayer;
+    int osuVideoOffset = 0;  // Video start offset in ms
 
     BeatmapInfo beatmap;
     std::string beatmapPath;
@@ -224,7 +244,9 @@ private:
     int keyBindingIndex;
     int editingValue;
     bool editingVolume;
-    bool dropdownExpanded;
+    bool dropdownExpanded;          // Output Device dropdown
+    bool audioModeDropdownExpanded;  // Audio Mode dropdown
+    bool asioDeviceDropdownExpanded; // ASIO Device dropdown
     bool judgeModeDropdownExpanded;
     bool resolutionDropdownExpanded;
     bool refreshRateDropdownExpanded;
@@ -260,6 +282,9 @@ private:
 
     // Song select
     std::vector<SongEntry> songList;
+    std::string songSelectSearch;  // Search filter text
+    std::vector<int> filteredSongIndices;  // Indices into songList matching current search
+    std::vector<std::vector<int>> filteredDiffIndices;  // Per-song matching difficulty indices (parallel to filteredSongIndices)
     int selectedSongIndex;
     int selectedDifficultyIndex;  // Selected difficulty within the song
     float songSelectScroll;  // Scroll offset for song list
@@ -278,6 +303,18 @@ private:
     bool songSelectTransition;  // True when transitioning out
     int64_t songSelectTransitionStart;  // Transition start time
     void scanSongsFolder();
+    void updateSongFilter();  // Rebuild filteredSongIndices from songSelectSearch
+
+    // Async Song Scanning
+    std::thread scanThread;
+    std::atomic<bool> scanRunning{false};
+    std::atomic<int> scanProgress{0};
+    std::atomic<int> scanTotal{0};
+    std::string scanStatusText;
+    std::mutex scanMutex;
+    GameState stateAfterScan = GameState::Menu;
+    void startScanAsync(bool clearIndex, GameState afterState);
+    void finalizeScan();
     void loadSongBackground(int songIndex, int diffIndex = -1);
     void updateBackgroundLoad();  // Check async background load completion
     void playPreviewMusic(int songIndex, int diffIndex = -1);

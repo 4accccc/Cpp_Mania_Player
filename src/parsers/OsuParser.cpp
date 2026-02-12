@@ -19,6 +19,7 @@ std::string OsuParser::trim(const std::string& str) {
 }
 
 int OsuParser::xToLane(int x, int keyCount) {
+    if (keyCount <= 0) return 0;
     int laneWidth = 512 / keyCount;
     return std::min(x / laneWidth, keyCount - 1);
 }
@@ -118,9 +119,13 @@ bool OsuParser::parse(const std::string& filepath, BeatmapInfo& info) {
             }
             else if (section == "Metadata") {
                 if (key == "Title") info.title = value;
+                else if (key == "TitleUnicode") info.titleUnicode = value;
                 else if (key == "Artist") info.artist = value;
+                else if (key == "ArtistUnicode") info.artistUnicode = value;
                 else if (key == "Creator") info.creator = value;
                 else if (key == "Version") info.version = value;
+                else if (key == "Source") info.source = value;
+                else if (key == "Tags") info.tags = value;
             }
             else if (section == "Difficulty") {
                 if (key == "CircleSize") {
@@ -164,6 +169,24 @@ bool OsuParser::parse(const std::string& filepath, BeatmapInfo& info) {
                 } catch (const std::exception& e) {
                     SDL_Log("OsuParser: Failed to parse timing point: %s", line.c_str());
                 }
+            }
+        }
+
+        // Parse Events - Video
+        if (section == "Events" && (line.rfind("Video,", 0) == 0 || line.rfind("1,", 0) == 0)) {
+            // Format: Video,offset,"filename" or 1,offset,"filename"
+            size_t firstQuote = line.find('"');
+            size_t lastQuote = line.rfind('"');
+            if (firstQuote != std::string::npos && lastQuote > firstQuote) {
+                info.videoFilename = line.substr(firstQuote + 1, lastQuote - firstQuote - 1);
+                // Parse offset (second comma-separated field)
+                try {
+                    size_t comma1 = line.find(',');
+                    size_t comma2 = line.find(',', comma1 + 1);
+                    if (comma1 != std::string::npos && comma2 != std::string::npos) {
+                        info.videoOffset = std::stoi(trim(line.substr(comma1 + 1, comma2 - comma1 - 1)));
+                    }
+                } catch (...) {}
             }
         }
 

@@ -117,8 +117,8 @@ double OsuStableStarRating::calculateStrain(std::vector<DifficultyObject>& objec
             obj.laneDelta = obj.startTime;
         }
 
-        // Handle section boundaries
-        while (obj.startTime > currentSectionEnd) {
+        // Handle section boundaries (cap iterations to prevent infinite loop on corrupted data)
+        while (obj.startTime > currentSectionEnd && strainPeaks.size() < 100000) {
             strainPeaks.push_back(currentSectionStrain);
             // Decay strain at section boundary
             if (prevNote) {
@@ -344,7 +344,7 @@ double OsuStable2022StarRating::calculate(const std::vector<Note>& notes, int ke
     for (size_t i = 1; i < objects.size(); i++) {
         const DiffObj& obj = objects[i];
 
-        while (static_cast<double>(obj.startTime) > sectionEnd) {
+        while (static_cast<double>(obj.startTime) > sectionEnd && strainPeaks.size() < 100000) {
             if (prevObj == nullptr) {
                 currentStrain = 1.0;
             } else {

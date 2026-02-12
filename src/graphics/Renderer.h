@@ -65,6 +65,7 @@ public:
     void renderText(const char* text, float x, float y);
     void renderTextRight(const char* text, float rightX, float y);  // Right-aligned text
     void renderTextClipped(const char* text, float x, float y, float maxWidth);
+    int getTextWidth(const char* text);  // Get pixel width of text string
     void renderLabel(const char* text, float x, float y);
     int renderDropdown(const char* label, const char** options, int optionCount, int selected, float x, float y, float w, int mouseX, int mouseY, bool clicked, bool& expanded);
     bool renderRadioButton(const char* label, bool selected, float x, float y, int mouseX, int mouseY, bool clicked);

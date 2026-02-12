@@ -5,6 +5,10 @@
 #include <filesystem>
 #include <set>
 #include <cstring>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <queue>
 
 namespace fs = std::filesystem;
 
@@ -221,6 +225,23 @@ bool AcbParser::convertHcaToWav(const std::string& hcaPath, const std::string& w
     return result == 0 && fs::exists(wavPath);
 }
 
+// Parallel conversion helper: worker threads pull jobs from a shared queue
+static void convertWorker(std::queue<std::pair<std::string, std::string>>& jobs,
+                          std::mutex& jobMutex) {
+    while (true) {
+        std::pair<std::string, std::string> job;
+        {
+            std::lock_guard<std::mutex> lock(jobMutex);
+            if (jobs.empty()) return;
+            job = jobs.front();
+            jobs.pop();
+        }
+        AcbParser::convertHcaToWav(job.first, job.second);
+        // Remove HCA file after conversion
+        fs::remove(job.first);
+    }
+}
+
 bool AcbParser::extractAndConvert(const std::string& acbPath, const std::string& outputDir) {
     std::vector<HcaData> hcaFiles;
     if (!parse(acbPath, hcaFiles)) return false;
@@ -230,25 +251,33 @@ bool AcbParser::extractAndConvert(const std::string& acbPath, const std::string&
     // Find BGM index (longest audio)
     int bgmIndex = findBgmIndex(hcaFiles);
 
+    // Phase 1: Write all HCA files to disk
+    std::queue<std::pair<std::string, std::string>> jobs;
     for (size_t i = 0; i < hcaFiles.size(); i++) {
-        // Use index as filename for reliable mapping
         std::string baseName = std::to_string(i);
         std::string hcaPath = outputDir + "/" + baseName + ".hca";
         std::string wavPath = outputDir + "/" + baseName + ".wav";
 
-        // Write HCA file
         std::ofstream out(hcaPath, std::ios::binary);
         if (out) {
             out.write(reinterpret_cast<const char*>(hcaFiles[i].data.data()),
                       hcaFiles[i].data.size());
             out.close();
-
-            // Convert to WAV
-            convertHcaToWav(hcaPath, wavPath);
-
-            // Remove HCA file after conversion
-            fs::remove(hcaPath);
+            jobs.push({hcaPath, wavPath});
         }
+    }
+
+    // Phase 2: Parallel FFmpeg conversion
+    unsigned int maxThreads = std::max(1u, std::thread::hardware_concurrency());
+    unsigned int numThreads = std::min(maxThreads, static_cast<unsigned int>(jobs.size()));
+    std::mutex jobMutex;
+
+    std::vector<std::thread> workers;
+    for (unsigned int t = 0; t < numThreads; t++) {
+        workers.emplace_back(convertWorker, std::ref(jobs), std::ref(jobMutex));
+    }
+    for (auto& w : workers) {
+        w.join();
     }
 
     // Create BGM copy for easy access
@@ -273,24 +302,40 @@ bool AcbParser::extractAndConvert(const std::string& acbPath, const std::string&
     // Find BGM index (longest audio)
     int bgmIndex = findBgmIndex(hcaFiles);
 
+    // Phase 1: Write all HCA files to disk
+    std::queue<std::pair<std::string, std::string>> jobs;
     for (size_t i = 0; i < hcaFiles.size(); i++) {
-        // Use cue name as filename if available, otherwise use index
         std::string baseName = (i < cueNames.size()) ? cueNames[i] : std::to_string(i);
         std::string hcaPath = outputDir + "/" + baseName + ".hca";
         std::string wavPath = outputDir + "/" + baseName + ".wav";
 
-        // Write HCA file
+        // Skip if WAV already exists (per-file cache)
+        if (fs::exists(wavPath)) continue;
+
         std::ofstream out(hcaPath, std::ios::binary);
         if (out) {
             out.write(reinterpret_cast<const char*>(hcaFiles[i].data.data()),
                       hcaFiles[i].data.size());
             out.close();
+            jobs.push({hcaPath, wavPath});
+        }
+    }
 
-            // Convert to WAV
-            convertHcaToWav(hcaPath, wavPath);
+    // Phase 2: Parallel FFmpeg conversion
+    if (!jobs.empty()) {
+        unsigned int maxThreads = std::max(1u, std::thread::hardware_concurrency());
+        unsigned int numThreads = std::min(maxThreads, static_cast<unsigned int>(jobs.size()));
+        std::mutex jobMutex;
 
-            // Remove HCA file after conversion
-            fs::remove(hcaPath);
+        std::cerr << "[MUSYNX] Converting " << jobs.size() << " HCA files with "
+                  << numThreads << " threads" << std::endl;
+
+        std::vector<std::thread> workers;
+        for (unsigned int t = 0; t < numThreads; t++) {
+            workers.emplace_back(convertWorker, std::ref(jobs), std::ref(jobMutex));
+        }
+        for (auto& w : workers) {
+            w.join();
         }
     }
 

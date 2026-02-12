@@ -3,53 +3,63 @@
 
 ## Features
 
-- Read other rhythm game's charts
+- Read other rhythm game's charts (see below)
 - Play keysounds
 - Support osu's storyboard
 - Capable with osu's skin
-- Can Read / Write / Edit osu! replay files [*.osr]
+- osu! replay (.osr) read / write / edit
+- Replay Analyze (analyze, generate video)
+- Star rating & PP calculation
+- Low-latency audio: DirectSound, WASAPI Shared/Exclusive, ASIO
 
 ## Support Chart formats
 
 - Beatmania IIDX [*.1]
-- Be-Music Script [*.bms]
+- Be-Music Script [*.bms, *.bme, *.bml]
 - DJMAX RESPECT [*.bytes]
 - DJMAX ONLINE [*.pt]
 - Malody [*.mc]
 - MUSYNX/MUSYNC [*.txt]
 - osu!mania [*.osu] ([EXPERIMENTAL]support standard converted maps)
 - O2Jam [*.ojn]
+- StepMania [*.sm, *.ssc]
 
 ### Formats planned to support
 
 - EZ2DJ/EZ2ON
-- Stepmania
 - More...
 
 ## Tutorial: [How to add songs?](https://github.com/4accccc/Cpp_Mania_Player/wiki/Songs-folder-structure)
+
 ## Dependencies
 
-This project uses the following third-party libraries:
-
-### Precompiled Libraries
+### Precompiled Libraries (download required)
 
 | Library | Version | License | Description |
 |---------|---------|---------|-------------|
-| [SDL3](https://libsdl.org/) | 3.2.30 | zlib | Window, graphics, input handling |
+| [SDL3](https://libsdl.org/) | 3.2.30 | zlib | Window, graphics, input |
 | [SDL3_ttf](https://github.com/libsdl-org/SDL_ttf) | 3.2.0 | zlib | TrueType font rendering |
 | [BASS](https://www.un4seen.com/) | 2.4 | Commercial/Free | Audio playback |
-| [BASS_FX](https://www.un4seen.com/) | 2.4 | Commercial/Free | Audio effects (tempo change) |
+| [BASS_FX](https://www.un4seen.com/) | 2.4 | Commercial/Free | Audio effects (tempo) |
 | [ICU](https://icu.unicode.org/) | 78.2 | Unicode License | Unicode collation |
 | [FFmpeg](https://ffmpeg.org/) | 8.0.1 | LGPL | Video decoding |
 
-### Source Libraries
+### Optional Libraries (for low-latency audio)
+
+| Library | License | Description |
+|---------|---------|-------------|
+| [BASSmix](https://www.un4seen.com/) | Commercial/Free | Audio mixer (required for WASAPI/ASIO) |
+| [BASSWASAPI](https://www.un4seen.com/) | Commercial/Free | WASAPI output |
+| [BASSASIO](https://www.un4seen.com/) | Commercial/Free | ASIO output |
+
+### Source Libraries (included)
 
 | Library | License | Description |
 |---------|---------|-------------|
 | [LZMA SDK](https://7-zip.org/sdk.html) | Public Domain | LZMA compression |
 | [minilzo](http://www.oberhumer.com/opensource/lzo/) | GPL | LZO compression |
 
-### Header-only Libraries
+### Header-only Libraries (included)
 
 | Library | License | Description |
 |---------|---------|-------------|
@@ -185,49 +195,94 @@ This project uses the following third-party libraries:
 
 
 
+### Mania Player v0.0.6
+- 重构歌曲选择界面，加入元数据展示，osu!同款搜索功能
+- 重构音频系统，降低DirectSound音频延迟，加入WASAPI Shared/Exclusive, ASIO 支持
+- 修复处理部分osu!谱面时游戏闪退的问题
+- 修复 osu! 早期格式谱面 key 音无法读取的问题
+- 修复 osu! 谱面无法播放视频BGA的问题
+- 修复 osu! storyboard 显示异常的问题
+- 修复 osu! 谱面 key 音异常播放的问题
+- 修复 O2Jam SV变化没有被正确处理导致 note 密度异常变大的问题
+- 修复 O2Jam 使用 skip 功能导致 key 音和背景音乐错位的问题
+- 修复 MUSYNX key 音转码过慢的问题
+- 新增 Cinema Mod
+- 新增 StepMania 谱面读取
+
+
+
 ## Building
 
-### Prerequisites
+### 1. Download Dependencies
 
-Create `lib/x64/` directory and download the following libraries:
+The following libraries are **not included** in the repository and must be downloaded manually.
+
+#### BASS Audio Library (required)
+
+BASS is a commercial library, free for non-commercial use. Download from [un4seen.com](https://www.un4seen.com/):
+
+| Library | Download | Files Needed |
+|---------|----------|--------------|
+| BASS | [bass24](https://www.un4seen.com/download.php?bass24) | `bass.h`, `bass.lib`, `bass.dll` |
+| BASS_FX | [bass_fx24](https://www.un4seen.com/download.php?bass_fx24) | `bass_fx.h`, `bass_fx.lib`, `bass_fx.dll` |
+
+Optional (for low-latency WASAPI/ASIO output):
+
+| Library | Download | Files Needed |
+|---------|----------|--------------|
+| BASSmix | [bassmix24](https://www.un4seen.com/download.php?bassmix24) | `bassmix.h`, `bassmix.lib`, `bassmix.dll` |
+| BASSWASAPI | [basswasapi24](https://www.un4seen.com/download.php?basswasapi24) | `basswasapi.h`, `basswasapi.lib`, `basswasapi.dll` |
+| BASSASIO | [bassasio](https://www.un4seen.com/download.php?bassasio) | `bassasio.h`, `bassasio.lib`, `bassasio.dll` |
+
+Place files as follows:
+```
+include/bass/        <- All .h header files
+lib/x64/             <- All .lib files (Windows x64)
+```
+Place `.dll` files next to the built executable.
+
+#### Other Libraries (Windows)
+
+These are also needed in `lib/x64/`:
 
 | Library | Download | Files Needed |
 |---------|----------|--------------|
 | SDL3 | [GitHub Releases](https://github.com/libsdl-org/SDL/releases) | `SDL3.lib`, `SDL3.dll` |
 | SDL3_ttf | [GitHub Releases](https://github.com/libsdl-org/SDL_ttf/releases) | `SDL3_ttf.lib`, `SDL3_ttf.dll` |
-| BASS | [un4seen.com](https://www.un4seen.com/download.php?bass24) | `bass.lib`, `bass.dll` |
-| BASS_FX | [un4seen.com](https://www.un4seen.com/download.php?bass_fx24) | `bass_fx.lib`, `bass_fx.dll` |
-| ICU | [GitHub Releases](https://github.com/nickshanks/ICU/releases) or build from source | `icuuc.lib`, `icuin.lib`, `icuuc*.dll`, `icuin*.dll`, `icudt*.dll` |
+| ICU | [GitHub Releases](https://github.com/unicode-org/icu/releases) | `icuuc.lib`, `icuin.lib` + DLLs |
 | FFmpeg | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) (shared build) | `avcodec.lib`, `avformat.lib`, `avutil.lib`, `swscale.lib` + DLLs |
 
-Place `.lib` files in `lib/x64/` and `.dll` files in the output directory (or system PATH).
+### 2. Build
 
-### Windows (MSVC)
+#### Windows (MSVC, Visual Studio 2022+)
 
 ```batch
-# Using build.bat (Visual Studio 2022+)
+# Using build.bat (direct MSVC compilation)
 build.bat
 
 # Or using CMake
 mkdir build && cd build
-cmake .. -G "Visual Studio 17 2022" -A x64
+cmake .. -G "Visual Studio xx xxxx" -A x64
 cmake --build . --config Release
 ```
 
-### Linux
+Output: `build/bin/mania_player.exe`
 
-Install dependencies first:
+#### Linux
+
+Install dependencies:
 ```bash
 # Ubuntu/Debian
 sudo apt install build-essential cmake pkg-config
-sudo apt install libicu-dev libffmpeg-dev
+sudo apt install libicu-dev
+sudo apt install libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev
 
-# SDL3 and SDL3_ttf (build from source)
-# See: https://github.com/libsdl-org/SDL
-# See: https://github.com/libsdl-org/SDL_ttf
+# SDL3 and SDL3_ttf must be built from source
+# https://github.com/libsdl-org/SDL
+# https://github.com/libsdl-org/SDL_ttf
 
-# BASS 
-# Place libbass.so and libbass_fx.so in /usr/local/lib or use LD_LIBRARY_PATH
+# BASS and BASS_FX: download Linux versions from un4seen.com
+# Place libbass.so and libbass_fx.so in /usr/local/lib
 ```
 
 Build:
@@ -237,9 +292,17 @@ cmake ..
 make -j$(nproc)
 ```
 
-### macOS
+Output: `build/bin/mania_player`
+
+## macOS
 
 macOS support is experimental. You'll need to install dependencies via Homebrew or build from source.
+
+### 3. Run
+
+Run from the project root directory (where `Songs/` folder is located).
+
+Place songs in the `Songs/` folder. See the [wiki](https://github.com/4accccc/Cpp_Mania_Player/wiki/Songs-folder-structure) for folder structure.
 
 
 
@@ -255,5 +318,5 @@ All game assets and charts belong to their respective owners.
 ````
 This project is licensed under the GPL-3.0 License - see the LICENSE file for details.
 
-Note: BASS/BASS_FX are commercial libraries and must be downloaded separately.
+Note: BASS/BASS_FX are commercial libraries free for non-commercial use and must be downloaded separately from https://www.un4seen.com/
 ````

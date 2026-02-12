@@ -25,10 +25,16 @@ struct StoryboardSample {
 
 struct BeatmapInfo {
     std::string audioFilename;
+    std::string videoFilename;     // Background video filename (from Events)
+    int videoOffset = 0;           // Video start offset in ms
     std::string title;
+    std::string titleUnicode;
     std::string artist;
+    std::string artistUnicode;
     std::string creator;
     std::string version;  // Difficulty name
+    std::string source;   // Source metadata (e.g. "Touhou", "Vocaloid")
+    std::string tags;     // Space-separated tags
     std::string beatmapHash;  // MD5 hash of .osu file
     int mode;
     int keyCount;
@@ -39,6 +45,7 @@ struct BeatmapInfo {
     float sliderMultiplier;   // For slider duration calculation
     int totalObjectCount;      // Total hit objects
     int endTimeObjectCount;    // Sliders + Spinners (objects with duration)
+    int previewTime = -1;      // Preview start time in ms (-1 = use default 40%)
     std::vector<Note> notes;
     std::vector<TimingPoint> timingPoints;  // For density calculation
     std::vector<StoryboardSample> storyboardSamples;  // Auto-played sounds

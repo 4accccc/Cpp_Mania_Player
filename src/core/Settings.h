@@ -39,6 +39,9 @@ struct Settings {
     int volume;
     int audioDevice;
     int audioOffset;  // Audio offset in ms (negative = notes earlier, positive = notes later)
+    int audioOutputMode;  // 0=DirectSound, 1=WASAPI Shared, 2=WASAPI Exclusive, 3=ASIO
+    int audioBufferSize;  // Buffer size in ms
+    int asioDevice;       // ASIO device index
     int quality;
     bool lowSpecMode;
     int resolution;
@@ -68,6 +71,7 @@ struct Settings {
 
     // Modifiers
     bool autoPlayEnabled;  // AutoPlay mod enabled in settings
+    bool cinemaEnabled;    // Cinema mod - hide game area, autoplay for keysounds
     bool hiddenEnabled;    // Hidden mod enabled in settings
     bool fadeInEnabled;    // FadeIn mod enabled in settings
     bool ignoreSV;         // Ignore scroll velocity changes
@@ -101,6 +105,9 @@ struct Settings {
         volume = 100;
         audioDevice = 0;
         audioOffset = 0;  // Default no offset
+        audioOutputMode = 0;  // DirectSound
+        audioBufferSize = 40; // 40ms default
+        asioDevice = 0;
         quality = 2;
         lowSpecMode = false;
         resolution = 0;
@@ -138,6 +145,7 @@ struct Settings {
         forceOverrideUsername = false;
 
         autoPlayEnabled = false;  // AutoPlay disabled by default
+        cinemaEnabled = false;    // Cinema disabled by default
         hiddenEnabled = false;    // Hidden disabled by default
         fadeInEnabled = false;    // FadeIn disabled by default
         ignoreSV = false;         // Ignore SV disabled by default
