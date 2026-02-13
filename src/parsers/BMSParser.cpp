@@ -546,6 +546,7 @@ bool BMSParser::parseFull(const std::string& filepath, BMSData& data) {
             // Normal note - if LNOBJ exists, record as potential long note start
             if (!lnobj.empty()) {
                 lnStarts[lane] = {time, wavId};
+                continue;  // Don't add as normal note yet; will be added as LN or leftover
             }
 
             // Create normal note
@@ -553,6 +554,13 @@ bool BMSParser::parseFull(const std::string& filepath, BMSData& data) {
             note.customIndex = wavId;
             info.notes.push_back(note);
         }
+    }
+
+    // Add remaining LNOBJ starts that were never matched as normal notes
+    for (auto& [lane, startInfo] : lnStarts) {
+        Note note(lane, startInfo.first);
+        note.customIndex = startInfo.second;
+        info.notes.push_back(note);
     }
 
     // Sort notes by time

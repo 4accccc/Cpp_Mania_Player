@@ -41,6 +41,7 @@ public:
 
     // Get timing point volume at a specific time
     void setTimingPointVolume(int volume) { timingPointVolume = volume; }
+    void setKeysoundVolume(int volume) { keysoundVolume = volume; }
 
 private:
     AudioManager* audioManager;
@@ -54,6 +55,9 @@ private:
 
     // Timing point volume (0-100)
     int timingPointVolume;
+
+    // Global keysound volume multiplier (0-100)
+    int keysoundVolume;
 
     // Helper: remove extension from filename
     std::string removeExtension(const std::string& filename);

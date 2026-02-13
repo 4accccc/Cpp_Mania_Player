@@ -241,7 +241,7 @@ void BMSBgaManager::update(int64_t currentTime, double clockRate) {
     lastUpdateTime_ = currentTime;
 
     // Update active video players with relative time
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         if (layers_[i].active && layers_[i].mediaType == BgaMediaType::Video) {
             int bmpId = layers_[i].currentBmpId;
             if (videoCache_.count(bmpId) && videoCache_[bmpId]) {

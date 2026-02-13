@@ -101,12 +101,12 @@ struct ManiaConfig {
     // Initialize arrays for specific key count
     void initForKeys(int keyCount) {
         keys = keyCount;
-        columnWidth.resize(keys, DEFAULT_COLUMN_SIZE);
-        columnLineWidth.resize(keys + 1, 0.0f);  // Default: no separator lines
-        columnLine.resize(keys + 1, true);
-        columnSpacing.resize(keys > 1 ? keys - 1 : 0, 0.0f);
-        explosionWidth.resize(keys, 0.0f);
-        holdNoteLightWidth.resize(keys, 0.0f);
+        columnWidth.assign(keys, DEFAULT_COLUMN_SIZE);
+        columnLineWidth.assign(keys + 1, 0.0f);  // Default: no separator lines
+        columnLine.assign(keys + 1, true);
+        columnSpacing.assign(keys > 1 ? keys - 1 : 0, 0.0f);
+        explosionWidth.assign(keys, 0.0f);
+        holdNoteLightWidth.assign(keys, 0.0f);
     }
 
     // Get minimum column width

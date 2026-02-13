@@ -42,6 +42,9 @@ bool Renderer::init() {
     if (!font) {
         font = TTF_OpenFont("C:/Windows/Fonts/arial.ttf", 24);
     }
+    if (!font) {
+        return false;
+    }
     return true;
 }
 
@@ -408,8 +411,8 @@ void Renderer::renderLanes() {
     }
 
     for (int i = 0; i <= keyCount; i++) {
-        // Default line width: 2.0f if no skin, 0 if skin loaded (skin should specify)
-        float lineWidth = cfg ? 0.0f : 2.0f;
+        // Default line width: 2.0f if no skin at all, 0 if skin loaded
+        float lineWidth = skinManager ? 0.0f : 2.0f;
         if (cfg && i < (int)cfg->columnLineWidth.size()) {
             lineWidth = cfg->columnLineWidth[i];
         }
@@ -2096,7 +2099,7 @@ void Renderer::renderMenu() {
         SDL_DestroySurface(s);
     }
 
-    const char* version = "Version 0.0.6";
+    const char* version = "Version 0.0.7a";
     s = TTF_RenderText_Blended(font, version, strlen(version), white);
     if (s) {
         SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
@@ -2418,7 +2421,7 @@ void Renderer::renderLabel(const char* text, float x, float y) {
 }
 
 int Renderer::renderDropdown(const char* label, const char** options, int optionCount, int selected,
-                              float x, float y, float w, int mouseX, int mouseY, bool clicked, bool& expanded) {
+                              float x, float y, float w, int mouseX, int mouseY, bool& clicked, bool& expanded) {
     float h = 30;
     int newSelected = selected;
 
@@ -2448,36 +2451,82 @@ int Renderer::renderDropdown(const char* label, const char** options, int option
 
     if (hoverMain && clicked) {
         expanded = !expanded;
+        clicked = false;  // Consume click
     }
 
     if (expanded) {
+        // Store overlay data for deferred rendering (drawn on top of all controls)
+        pendingDropdown_.active = true;
+        pendingDropdown_.options.clear();
+        for (int i = 0; i < optionCount; i++) {
+            pendingDropdown_.options.push_back(options[i]);
+        }
+        pendingDropdown_.optionCount = optionCount;
+        pendingDropdown_.selected = selected;
+        pendingDropdown_.x = x;
+        pendingDropdown_.y = y;
+        pendingDropdown_.w = w;
+        pendingDropdown_.h = h;
+        pendingDropdown_.mouseX = mouseX;
+        pendingDropdown_.mouseY = mouseY;
+        pendingDropdown_.expandedPtr = &expanded;
+        pendingDropdown_.resultPtr = nullptr;  // Will be handled in overlay
+
+        // Check clicks now to update selection (result applied in overlay)
         for (int i = 0; i < optionCount; i++) {
             float optY = y + h + i * h;
             bool hoverOpt = mouseX >= x && mouseX <= x + w && mouseY >= optY && mouseY <= optY + h;
-            SDL_SetRenderDrawColor(renderer, hoverOpt ? 70 : 50, hoverOpt ? 70 : 50, hoverOpt ? 90 : 70, 255);
-            SDL_FRect optRect = {x, optY, w, h};
-            SDL_RenderFillRect(renderer, &optRect);
-
-            if (font) {
-                SDL_Color white = {255, 255, 255, 255};
-                SDL_Surface* s = TTF_RenderText_Blended(font, options[i], strlen(options[i]), white);
-                if (s) {
-                    SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
-                    SDL_FRect dst = {x + 8, optY + (h - s->h) / 2, (float)s->w, (float)s->h};
-                    SDL_RenderTexture(renderer, t, nullptr, &dst);
-                    SDL_DestroyTexture(t);
-                    SDL_DestroySurface(s);
-                }
-            }
-
             if (hoverOpt && clicked) {
                 newSelected = i;
                 expanded = false;
+                pendingDropdown_.active = false;
             }
+        }
+
+        // Consume click when dropdown is expanded (prevent click-through)
+        if (clicked) {
+            // Click outside options - close dropdown
+            expanded = false;
+            pendingDropdown_.active = false;
+            clicked = false;
         }
     }
 
     return newSelected;
+}
+
+void Renderer::renderDropdownOverlay() {
+    if (!pendingDropdown_.active) return;
+
+    float x = pendingDropdown_.x;
+    float y = pendingDropdown_.y;
+    float w = pendingDropdown_.w;
+    float h = pendingDropdown_.h;
+    int mouseX = pendingDropdown_.mouseX;
+    int mouseY = pendingDropdown_.mouseY;
+
+    for (int i = 0; i < pendingDropdown_.optionCount; i++) {
+        float optY = y + h + i * h;
+        bool hoverOpt = mouseX >= x && mouseX <= x + w && mouseY >= optY && mouseY <= optY + h;
+        SDL_SetRenderDrawColor(renderer, hoverOpt ? 70 : 50, hoverOpt ? 70 : 50, hoverOpt ? 90 : 70, 255);
+        SDL_FRect optRect = {x, optY, w, h};
+        SDL_RenderFillRect(renderer, &optRect);
+
+        if (font && i < (int)pendingDropdown_.options.size()) {
+            SDL_Color white = {255, 255, 255, 255};
+            const std::string& opt = pendingDropdown_.options[i];
+            SDL_Surface* s = TTF_RenderText_Blended(font, opt.c_str(), opt.size(), white);
+            if (s) {
+                SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
+                SDL_FRect dst = {x + 8, optY + (h - s->h) / 2, (float)s->w, (float)s->h};
+                SDL_RenderTexture(renderer, t, nullptr, &dst);
+                SDL_DestroyTexture(t);
+                SDL_DestroySurface(s);
+            }
+        }
+    }
+
+    pendingDropdown_.active = false;
 }
 
 bool Renderer::renderRadioButton(const char* label, bool selected, float x, float y,
@@ -2622,6 +2671,34 @@ void Renderer::renderPauseMenu(int selection, float alpha) {
         SDL_DestroyTexture(t);
         SDL_DestroySurface(hint);
     }
+}
+
+void Renderer::renderPauseCountdown(float seconds, float alpha) {
+    if (!font || seconds < 0) return;
+    uint8_t a = static_cast<uint8_t>(alpha * 255);
+
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.2f", seconds);
+
+    SDL_Color yellow = {255, 255, 0, a};
+    SDL_Surface* surf = TTF_RenderText_Blended(font, buf, strlen(buf), yellow);
+    if (!surf) return;
+
+    SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
+    SDL_SetTextureAlphaMod(tex, a);
+    SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
+
+    // Scale up 3x for visibility
+    float scale = 3.0f;
+    float w = surf->w * scale;
+    float h = surf->h * scale;
+    float x = (windowWidth - w) / 2.0f;
+    float y = (windowHeight - h) / 2.0f;
+    SDL_FRect dst = {x, y, w, h};
+    SDL_RenderTexture(renderer, tex, nullptr, &dst);
+
+    SDL_DestroyTexture(tex);
+    SDL_DestroySurface(surf);
 }
 
 void Renderer::renderDeathMenu(int selection, float slowdown, float alpha) {

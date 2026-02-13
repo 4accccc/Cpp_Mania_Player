@@ -4,6 +4,31 @@
 #include <cmath>
 #include <SDL3/SDL.h>
 
+// Perceptual volume curve: maps linear 0-100 to exponential 0.0-1.0
+// Human hearing is logarithmic, so a quadratic curve feels more natural
+static float perceptualVolume(int vol) {
+    float v = (std::max)(0, (std::min)(100, vol)) / 100.0f;
+    return v * v;
+}
+
+#ifdef _WIN32
+#include <windows.h>
+// Convert ANSI (system codepage) string to UTF-8
+static std::string ansiToUtf8(const char* ansi) {
+    if (!ansi || !ansi[0]) return "";
+    int wlen = MultiByteToWideChar(CP_ACP, 0, ansi, -1, nullptr, 0);
+    if (wlen <= 0) return ansi;
+    std::wstring wstr(wlen, 0);
+    MultiByteToWideChar(CP_ACP, 0, ansi, -1, &wstr[0], wlen);
+    int ulen = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (ulen <= 0) return ansi;
+    std::string utf8(ulen, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &utf8[0], ulen, nullptr, nullptr);
+    if (!utf8.empty() && utf8.back() == '\0') utf8.pop_back();
+    return utf8;
+}
+#endif
+
 #ifndef _WIN32
 #include <fstream>
 #include <filesystem>
@@ -182,6 +207,16 @@ void AudioManager::shutdown() {
 }
 
 void AudioManager::cleanupMixerChannels() {
+#ifdef _WIN32
+    if (mixerFuncs.loaded && mixerFuncs.ChannelGetMixer) {
+        // Remove channels no longer in the mixer (AUTOFREE'd after playback ended)
+        activeMixerChannels.erase(
+            std::remove_if(activeMixerChannels.begin(), activeMixerChannels.end(),
+                [this](DWORD ch) { return !mixerFuncs.ChannelGetMixer(ch); }),
+            activeMixerChannels.end());
+        return;
+    }
+#endif
     activeMixerChannels.clear();
 }
 
@@ -511,7 +546,7 @@ std::vector<std::string> AudioManager::getWasapiDevices() {
     BASS_WASAPI_DEVICEINFO info;
     for (int i = 0; wasapiFuncs.GetDeviceInfo(i, &info); i++) {
         if ((info.flags & BASS_DEVICE_ENABLED) && !(info.flags & BASS_DEVICE_INPUT)) {
-            devices.push_back(info.name);
+            devices.push_back(ansiToUtf8(info.name));
         }
     }
     if (devices.empty()) devices.push_back("Default");
@@ -523,7 +558,7 @@ std::vector<std::string> AudioManager::getAsioDevices() {
     if (!asioFuncs.loaded || !asioFuncs.GetDeviceInfo) return devices;
     BASS_ASIO_DEVICEINFO info;
     for (int i = 0; asioFuncs.GetDeviceInfo(i, &info); i++) {
-        devices.push_back(info.name);
+        devices.push_back(ansiToUtf8(info.name));
     }
     return devices;
 }
@@ -659,13 +694,13 @@ void AudioManager::fadeIn(int ms) {
     if (useMixer && mixerFuncs.loaded) {
         BASS_ChannelSetAttribute(tempoStream, BASS_ATTRIB_VOL, 0);
         mixerFuncs.ChannelFlags(tempoStream, 0, BASS_MIXER_CHAN_PAUSE);
-        BASS_ChannelSlideAttribute(tempoStream, BASS_ATTRIB_VOL, currentVolume / 100.0f, ms);
+        BASS_ChannelSlideAttribute(tempoStream, BASS_ATTRIB_VOL, perceptualVolume(currentVolume), ms);
         return;
     }
 #endif
     BASS_ChannelSetAttribute(tempoStream, BASS_ATTRIB_VOL, 0);
     BASS_ChannelPlay(tempoStream, FALSE);
-    BASS_ChannelSlideAttribute(tempoStream, BASS_ATTRIB_VOL, currentVolume / 100.0f, ms);
+    BASS_ChannelSlideAttribute(tempoStream, BASS_ATTRIB_VOL, perceptualVolume(currentVolume), ms);
 }
 
 void AudioManager::fadeOut(int ms) {
@@ -760,7 +795,7 @@ int64_t AudioManager::getDuration() const {
 void AudioManager::setVolume(int volume) {
     currentVolume = (std::max)(0, (std::min)(100, volume));
     if (tempoStream) {
-        BASS_ChannelSetAttribute(tempoStream, BASS_ATTRIB_VOL, currentVolume / 100.0f);
+        BASS_ChannelSetAttribute(tempoStream, BASS_ATTRIB_VOL, perceptualVolume(currentVolume));
     }
 }
 
@@ -773,7 +808,11 @@ std::vector<std::string> AudioManager::getAudioDevices() {
     BASS_DEVICEINFO info;
     for (int i = 1; BASS_GetDeviceInfo(i, &info); i++) {
         if (info.flags & BASS_DEVICE_ENABLED) {
+#ifdef _WIN32
+            devices.push_back(ansiToUtf8(info.name));
+#else
             devices.push_back(info.name);
+#endif
         }
     }
     if (devices.empty()) {
@@ -837,6 +876,9 @@ void AudioManager::playSample(int handle, int volume, int64_t offsetMs) {
 
 #ifdef _WIN32
     if (useMixer && mixerFuncs.loaded && mixerStream) {
+        // Periodically prune dead channels (AUTOFREE'd after playback ended)
+        if (activeMixerChannels.size() > 64) cleanupMixerChannels();
+
         // Mixer mode: get channel as decode stream, add to mixer
         HCHANNEL channel = BASS_SampleGetChannel(it->second, BASS_SAMCHAN_STREAM | BASS_STREAM_DECODE);
         if (!channel) return;
@@ -858,6 +900,7 @@ void AudioManager::playSample(int handle, int volume, int64_t offsetMs) {
         // BASS_STREAM_AUTOFREE: mixer removes channel when it ends
         mixerFuncs.StreamAddChannel(mixerStream, channel,
             BASS_STREAM_AUTOFREE | BASS_MIXER_CHAN_NORAMPIN);
+        activeMixerChannels.push_back(channel);
         return;
     }
 #endif
@@ -884,8 +927,18 @@ void AudioManager::playSample(int handle, int volume, int64_t offsetMs) {
 }
 
 void AudioManager::pauseAllSamples() {
-    // In mixer mode, pausing the music channel is enough since samples
-    // auto-free. But for safety, stop active sample channels too.
+#ifdef _WIN32
+    if (useMixer && mixerFuncs.loaded) {
+        // Mixer mode: BASS_SampleGetChannels can't find BASS_SAMCHAN_STREAM channels,
+        // so use our tracked list instead
+        for (DWORD ch : activeMixerChannels) {
+            if (mixerFuncs.ChannelGetMixer && mixerFuncs.ChannelGetMixer(ch)) {
+                mixerFuncs.ChannelFlags(ch, BASS_MIXER_CHAN_PAUSE, BASS_MIXER_CHAN_PAUSE);
+            }
+        }
+        return;
+    }
+#endif
     for (auto& pair : sampleCache) {
         DWORD count = BASS_SampleGetChannels(pair.second, nullptr);
         if (count > 0) {
@@ -901,6 +954,16 @@ void AudioManager::pauseAllSamples() {
 }
 
 void AudioManager::resumeAllSamples() {
+#ifdef _WIN32
+    if (useMixer && mixerFuncs.loaded) {
+        for (DWORD ch : activeMixerChannels) {
+            if (mixerFuncs.ChannelGetMixer && mixerFuncs.ChannelGetMixer(ch)) {
+                mixerFuncs.ChannelFlags(ch, 0, BASS_MIXER_CHAN_PAUSE);
+            }
+        }
+        return;
+    }
+#endif
     for (auto& pair : sampleCache) {
         DWORD count = BASS_SampleGetChannels(pair.second, nullptr);
         if (count > 0) {
@@ -916,6 +979,17 @@ void AudioManager::resumeAllSamples() {
 }
 
 void AudioManager::stopAllSamples() {
+#ifdef _WIN32
+    if (useMixer && mixerFuncs.loaded && mixerFuncs.ChannelRemove) {
+        for (DWORD ch : activeMixerChannels) {
+            if (mixerFuncs.ChannelGetMixer && mixerFuncs.ChannelGetMixer(ch)) {
+                mixerFuncs.ChannelRemove(ch);
+            }
+        }
+        activeMixerChannels.clear();
+        return;
+    }
+#endif
     for (auto& pair : sampleCache) {
         BASS_SampleStop(pair.second);
     }
@@ -967,6 +1041,7 @@ void AudioManager::warmupSamples() {
 }
 
 void AudioManager::clearSamples() {
+    activeMixerChannels.clear();
     for (auto& pair : sampleCache) {
         BASS_SampleFree(pair.second);
     }

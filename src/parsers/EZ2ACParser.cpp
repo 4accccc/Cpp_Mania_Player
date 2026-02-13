@@ -1,0 +1,637 @@
+#include "EZ2ACParser.h"
+#include "OsuParser.h"
+#include <fstream>
+#include <algorithm>
+#include <cstring>
+#include <cmath>
+#include <sstream>
+#include <filesystem>
+
+namespace fs = std::filesystem;
+
+// Key table for .ez chart files (byte_4A74B0, stride 4, 512 entries)
+// TODO: paste from Python KEY_EZ
+static const uint8_t KEY_EZ[512] = {
+    0x12, 0x5D, 0x94, 0x62, 0x5F, 0xA4, 0xB5, 0xC9, 0xA9, 0xC0, 0xA7, 0x7A, 0x76, 0xA2, 0x1D, 0x11,
+    0x6E, 0x2B, 0x6E, 0xB5, 0x44, 0xF6, 0xC9, 0x10, 0xBF, 0xB3, 0x18, 0xDD, 0x03, 0x23, 0xCD, 0x2F,
+    0xCD, 0x8D, 0x8B, 0xF0, 0x5D, 0x63, 0xBE, 0x00, 0xB6, 0xFD, 0xD6, 0xE3, 0x4B, 0x0F, 0xCB, 0x94,
+    0x01, 0x85, 0x4B, 0xA8, 0xF0, 0x7C, 0x3A, 0x7B, 0x65, 0x0B, 0x66, 0xDC, 0x1E, 0xD6, 0x29, 0xF2,
+    0x06, 0x6F, 0xFF, 0x30, 0x60, 0x55, 0x66, 0x0F, 0xD6, 0x79, 0x3E, 0xBE, 0x33, 0xB9, 0xDD, 0xB1,
+    0xAB, 0x6D, 0x2A, 0x5F, 0x15, 0x94, 0x9D, 0x4F, 0x48, 0xB6, 0x43, 0xB4, 0x63, 0xE9, 0x5F, 0x2E,
+    0x62, 0xC6, 0xAF, 0xB4, 0xD7, 0x5E, 0x19, 0x93, 0x2E, 0x81, 0xE2, 0x0F, 0x4E, 0xDE, 0x90, 0x79,
+    0x51, 0x0F, 0x27, 0x68, 0xE7, 0x4F, 0x77, 0x68, 0xBB, 0xC6, 0x98, 0x40, 0x78, 0x9F, 0xFD, 0x55,
+    0x02, 0x45, 0x2B, 0xEB, 0xE8, 0x9E, 0x35, 0x7D, 0x8B, 0xE2, 0x2D, 0x76, 0xE1, 0x29, 0xBE, 0xA7,
+    0x5B, 0x6F, 0x1F, 0x6D, 0x37, 0x14, 0x61, 0x03, 0x4C, 0x50, 0x6C, 0x5C, 0x8E, 0x83, 0x6A, 0x79,
+    0x51, 0x70, 0xEA, 0x4A, 0x92, 0xF2, 0x31, 0x4F, 0xD9, 0x7B, 0x22, 0x12, 0xA6, 0x7C, 0xBC, 0x5C,
+    0x2A, 0x75, 0x3B, 0xF8, 0x80, 0x18, 0x56, 0xD9, 0xD2, 0x1E, 0x0D, 0x8D, 0x01, 0xB9, 0xFC, 0x39,
+    0xD5, 0xBC, 0x01, 0xC8, 0xFF, 0x07, 0x3C, 0xDF, 0xF3, 0x4B, 0xA9, 0xCA, 0x12, 0xF1, 0x56, 0x6E,
+    0xE5, 0xA1, 0x29, 0x38, 0xD2, 0x62, 0x69, 0x74, 0x02, 0x61, 0x82, 0x56, 0x5B, 0x4A, 0xCE, 0x9C,
+    0x3D, 0xD6, 0x61, 0xF6, 0xC3, 0x68, 0x42, 0x46, 0x05, 0xFD, 0x4B, 0xB9, 0x01, 0x20, 0x88, 0x42,
+    0x32, 0x57, 0x92, 0x8F, 0x9F, 0x5F, 0x3D, 0x77, 0x49, 0x67, 0x0C, 0xAA, 0xB6, 0x98, 0x8A, 0x1B,
+    0x1F, 0x9B, 0xED, 0xB3, 0xCD, 0xD0, 0xED, 0x64, 0x75, 0xE3, 0xD9, 0xAA, 0x54, 0x7A, 0xD6, 0x1F,
+    0x90, 0xF8, 0x13, 0x89, 0x81, 0xA2, 0x22, 0x36, 0x62, 0x00, 0x65, 0x31, 0xE0, 0x71, 0x66, 0x0D,
+    0x3B, 0x4A, 0xE4, 0x39, 0xE1, 0x2D, 0xC4, 0x92, 0x0B, 0xD9, 0xE0, 0x3E, 0x51, 0x7F, 0x86, 0x09,
+    0x26, 0x72, 0x6B, 0x1A, 0x36, 0xB5, 0x02, 0x06, 0xE6, 0x65, 0x63, 0x13, 0x9E, 0xB6, 0x01, 0x5C,
+    0x4E, 0x25, 0x50, 0x2E, 0x4E, 0xAC, 0xBB, 0x06, 0x09, 0x78, 0xD2, 0x13, 0x3A, 0xD3, 0xAE, 0x11,
+    0x31, 0x81, 0xA3, 0xF5, 0xF4, 0xFD, 0x37, 0xEA, 0x07, 0x6C, 0xE3, 0xD1, 0x2C, 0x9C, 0x6C, 0x51,
+    0x35, 0x7A, 0x17, 0xAA, 0x62, 0x96, 0x52, 0x21, 0xDF, 0x36, 0x79, 0x3E, 0x60, 0x13, 0x88, 0x61,
+    0x85, 0x45, 0x2D, 0xAD, 0x8B, 0x5F, 0x7C, 0x09, 0xCC, 0x1B, 0x3A, 0x96, 0x57, 0x28, 0x2B, 0x43,
+    0xF9, 0x5B, 0xD1, 0x54, 0xE4, 0x51, 0xD8, 0x4F, 0x18, 0xF1, 0x37, 0x5E, 0x77, 0x82, 0xA1, 0x21,
+    0x3C, 0x46, 0xF5, 0x2A, 0x94, 0xAC, 0x70, 0xDC, 0xC5, 0xC0, 0xC4, 0x1E, 0x84, 0xC0, 0x53, 0x2B,
+    0x52, 0x4B, 0x5B, 0x04, 0x87, 0x47, 0x03, 0x84, 0x79, 0xF1, 0x72, 0xA3, 0x1D, 0x53, 0x59, 0x64,
+    0xD3, 0x8E, 0xB6, 0x33, 0x41, 0x29, 0x97, 0x24, 0x71, 0xAD, 0x61, 0x72, 0x13, 0xAE, 0xB8, 0x6F,
+    0xF0, 0x1A, 0x36, 0x22, 0x68, 0xA8, 0x17, 0xE7, 0x43, 0x7D, 0xB4, 0xBB, 0x54, 0x07, 0x1D, 0xC8,
+    0x25, 0x32, 0x6A, 0x8F, 0xAC, 0x0F, 0xE8, 0xC0, 0xDA, 0x07, 0x1A, 0xC0, 0x66, 0xA5, 0x32, 0x69,
+    0x9D, 0x98, 0xC7, 0x73, 0xB1, 0x66, 0x0C, 0x0A, 0x69, 0x28, 0x89, 0x6D, 0x34, 0xED, 0xEF, 0x0F,
+    0x86, 0x6E, 0x82, 0x19, 0x3D, 0xBA, 0xF6, 0x1E, 0x81, 0xC5, 0xC2, 0x2D, 0x93, 0xAB, 0x88, 0xF9,
+};
+
+// Key table for .ezi index files (byte_4A7CB0, stride 4, 512 entries)
+// TODO: paste from Python KEY_EZI
+static const uint8_t KEY_EZI[512] = {
+    0xF5, 0xFF, 0xD3, 0x9D, 0x76, 0xF6, 0x34, 0x6D, 0x73, 0x65, 0x8D, 0x49, 0x87, 0x63, 0x8F, 0x59,
+    0x03, 0xF3, 0xDF, 0x82, 0x65, 0x22, 0x69, 0xC9, 0x81, 0x18, 0x25, 0xA0, 0x87, 0x59, 0x16, 0x53,
+    0x24, 0x0E, 0x7F, 0x07, 0x3A, 0x18, 0x7B, 0xFB, 0xDC, 0x2D, 0x7D, 0x6C, 0x97, 0x08, 0x47, 0x5C,
+    0x83, 0xB0, 0x06, 0x33, 0xE8, 0x51, 0xC8, 0x4D, 0x17, 0xB6, 0x8E, 0xB7, 0x96, 0xE4, 0x21, 0x74,
+    0x3D, 0xC1, 0x3E, 0x17, 0x9F, 0x7B, 0x43, 0x09, 0xCC, 0x2F, 0xCD, 0xFF, 0x32, 0x25, 0x92, 0xAC,
+    0x5C, 0xDE, 0xD4, 0x59, 0x19, 0xF5, 0xAA, 0x03, 0xA7, 0x99, 0x05, 0x44, 0x18, 0x31, 0xB8, 0x5B,
+    0xFC, 0x3D, 0xC8, 0x49, 0xC0, 0x94, 0x25, 0xC5, 0x73, 0x89, 0xB1, 0x0B, 0x8E, 0xC8, 0x3B, 0x84,
+    0xFB, 0xA2, 0x2E, 0x85, 0x47, 0x7C, 0x5E, 0x9F, 0xEA, 0x18, 0x03, 0x12, 0xB0, 0x5E, 0x44, 0x98,
+    0xE4, 0x78, 0x38, 0x01, 0xE8, 0x85, 0x2F, 0x7A, 0x28, 0x72, 0xBC, 0x4E, 0x7E, 0x32, 0xBC, 0x1A,
+    0x6E, 0xD3, 0x08, 0xC2, 0x80, 0x56, 0x30, 0x49, 0xEF, 0x8C, 0x9D, 0x33, 0x00, 0xAD, 0xA0, 0xA1,
+    0x8D, 0x0D, 0x0F, 0xC7, 0xBB, 0x01, 0x6A, 0xCF, 0x1E, 0xDF, 0x74, 0xAF, 0x4B, 0x29, 0x18, 0x42,
+    0x4E, 0x63, 0x71, 0x69, 0xF0, 0xC3, 0xEC, 0xB7, 0x12, 0x29, 0x89, 0xE5, 0x1C, 0x4E, 0x6E, 0x26,
+    0x74, 0xBD, 0xF1, 0x5A, 0x10, 0x08, 0x9B, 0x90, 0xBC, 0x4C, 0x5E, 0x29, 0xC2, 0xF5, 0x3D, 0xA1,
+    0x36, 0xB7, 0x72, 0xC0, 0x41, 0x52, 0x95, 0xCF, 0xB9, 0x95, 0xD7, 0x75, 0x4A, 0x23, 0x62, 0x4E,
+    0xE6, 0x3A, 0xC4, 0x3D, 0xDE, 0xF6, 0x7E, 0x5E, 0xB7, 0xBD, 0x53, 0x1D, 0x81, 0x2F, 0x6D, 0x36,
+    0xDD, 0xA2, 0x4C, 0x0A, 0xC8, 0x8D, 0x86, 0x55, 0xBF, 0xE3, 0x36, 0xE8, 0xE2, 0x10, 0x05, 0x82,
+    0x72, 0x3D, 0xD4, 0x0D, 0x44, 0xC7, 0x46, 0x6F, 0xD0, 0x53, 0xA3, 0x88, 0x3F, 0x94, 0x6D, 0x1B,
+    0x13, 0x56, 0x2C, 0x1B, 0x9C, 0x18, 0xF5, 0x8E, 0x65, 0x16, 0xAE, 0x82, 0x03, 0xF9, 0x9D, 0x1B,
+    0x3D, 0xAE, 0xA2, 0x0B, 0x7B, 0x44, 0xA7, 0x9C, 0x5D, 0x37, 0x35, 0xD5, 0xEF, 0x98, 0x4A, 0x0F,
+    0xD2, 0x88, 0x96, 0x59, 0xA9, 0x0E, 0x3E, 0x55, 0xC3, 0x4A, 0xC0, 0xB4, 0xC3, 0x62, 0x38, 0x9B,
+    0x93, 0x05, 0x3B, 0xD5, 0xB9, 0x7C, 0x87, 0x25, 0x1E, 0x45, 0x00, 0xE5, 0x47, 0xA6, 0x5E, 0x17,
+    0x3B, 0x35, 0x45, 0x07, 0xF1, 0x67, 0xAA, 0x39, 0xF5, 0x38, 0x2C, 0x30, 0x33, 0x25, 0xA8, 0xAF,
+    0x23, 0x9D, 0xCC, 0xD6, 0xF3, 0x1C, 0x87, 0x0E, 0xE1, 0x0B, 0x35, 0x13, 0x89, 0x1A, 0x3E, 0xA7,
+    0x4D, 0x4B, 0x54, 0x06, 0x7E, 0xCA, 0xB1, 0x73, 0x68, 0xA3, 0x29, 0x07, 0x10, 0x55, 0x00, 0x40,
+    0x0E, 0x71, 0x8F, 0x00, 0xE7, 0xC0, 0xCF, 0x24, 0xE7, 0x06, 0x19, 0x50, 0xC6, 0xF9, 0xFF, 0xA4,
+    0x57, 0xE4, 0x2D, 0x39, 0x5F, 0xB0, 0x1E, 0x52, 0x55, 0x30, 0x21, 0xB5, 0x96, 0x37, 0x6A, 0x64,
+    0xD4, 0x9A, 0xE0, 0x26, 0x99, 0xE3, 0x52, 0x1E, 0x63, 0xC9, 0xBB, 0xE8, 0x50, 0xF5, 0x2B, 0x48,
+    0x16, 0x5A, 0x0D, 0x28, 0x90, 0x16, 0xC0, 0x2A, 0x21, 0x65, 0x9D, 0xDE, 0xF6, 0xB9, 0x61, 0xC6,
+    0x13, 0xA4, 0x67, 0x17, 0xCE, 0x5C, 0x09, 0xE6, 0x1E, 0xAB, 0x55, 0x39, 0xB4, 0x2F, 0x80, 0x70,
+    0x74, 0x4E, 0xE7, 0xCE, 0xE8, 0xCB, 0x6F, 0x51, 0x82, 0x10, 0xBA, 0x18, 0xA3, 0x72, 0xFB, 0x23,
+    0xA2, 0x55, 0x19, 0x32, 0x2B, 0x1D, 0x5E, 0x3D, 0x59, 0xA9, 0x7B, 0x8F, 0x42, 0x96, 0xD4, 0xAE,
+    0x64, 0x72, 0xFE, 0xEF, 0x7A, 0x13, 0x69, 0x2C, 0xFE, 0x97, 0x17, 0x1F, 0x99, 0xA5, 0x40, 0xD7,
+};
+
+// Key table for .ini files (byte_4A8568, stride 4, 512 entries)
+// TODO: paste from Python KEY_INI
+static const uint8_t KEY_INI[512] = {
+    0x2E, 0xC8, 0x1A, 0x48, 0x17, 0x97, 0xC8, 0x1B, 0x1F, 0xB6, 0x75, 0x25, 0xF7, 0x4D, 0xF1, 0x6B,
+    0xA1, 0x27, 0x0A, 0x79, 0xBE, 0x3A, 0x37, 0x02, 0x1A, 0x69, 0x3F, 0xC3, 0x44, 0xA6, 0x5A, 0x3E,
+    0x66, 0xDD, 0x5E, 0x2B, 0x29, 0xB7, 0x96, 0x7A, 0x39, 0x9C, 0xCA, 0xBC, 0x7C, 0x8C, 0xD9, 0x7A,
+    0xA3, 0x64, 0x23, 0x54, 0x2A, 0x06, 0xED, 0xA4, 0xCD, 0x1B, 0x2B, 0xD4, 0x43, 0x7D, 0x69, 0x22,
+    0xC5, 0x1A, 0xFB, 0xF3, 0xB9, 0x89, 0x32, 0x96, 0x26, 0x42, 0x40, 0x68, 0x4F, 0x5E, 0x26, 0x4B,
+    0x26, 0x96, 0x55, 0x74, 0xBF, 0x5F, 0x22, 0x58, 0x96, 0x4C, 0x67, 0x41, 0xC0, 0x44, 0x34, 0x6F,
+    0x1E, 0x62, 0x6F, 0x01, 0x23, 0x47, 0x4E, 0xB5, 0x15, 0xD6, 0xB6, 0xBB, 0x8A, 0xBE, 0xE3, 0x8F,
+    0xA7, 0x8F, 0xCA, 0x49, 0xCF, 0x1B, 0x28, 0x75, 0x13, 0xC1, 0x25, 0xFA, 0xA4, 0x05, 0x16, 0x02,
+    0x01, 0xD3, 0x2F, 0xC7, 0xCA, 0xBE, 0x32, 0xBC, 0x4B, 0x5C, 0x88, 0xFD, 0xCC, 0x34, 0xA3, 0x9D,
+    0x51, 0xE5, 0xD0, 0x57, 0x6B, 0x55, 0xAE, 0xC7, 0xF8, 0xE8, 0x70, 0x4B, 0x58, 0x88, 0xE1, 0xF4,
+    0xFC, 0x1E, 0xB5, 0xBF, 0xF1, 0xF4, 0x50, 0x2E, 0x26, 0x2E, 0x47, 0x24, 0x69, 0xBD, 0x30, 0x5F,
+    0x7B, 0x2D, 0x30, 0x4B, 0xC4, 0x38, 0x31, 0x43, 0xAA, 0x0E, 0x1A, 0xD9, 0xA2, 0xF2, 0x80, 0xDC,
+    0xB2, 0x9E, 0x91, 0x7C, 0xAD, 0x56, 0x0C, 0x4A, 0x43, 0x3C, 0xA6, 0x47, 0xED, 0x75, 0x9E, 0xA9,
+    0x08, 0x91, 0xA7, 0xD0, 0x55, 0x39, 0x57, 0xA6, 0x40, 0x1A, 0x41, 0x28, 0xD6, 0xD3, 0xE9, 0xEA,
+    0x74, 0x71, 0xCB, 0x33, 0x94, 0x00, 0x6E, 0x79, 0x02, 0xC4, 0x90, 0x6D, 0xD2, 0x83, 0xD4, 0x35,
+    0xB2, 0x00, 0x2D, 0xCB, 0x19, 0x86, 0xAE, 0x59, 0x65, 0x93, 0xD1, 0x54, 0x77, 0x4A, 0xF5, 0x30,
+    0xD8, 0xD3, 0x82, 0x53, 0xB6, 0xC0, 0xB8, 0x09, 0xC1, 0x15, 0xDF, 0x4E, 0xCC, 0x40, 0xF8, 0x53,
+    0xB6, 0x88, 0x4F, 0x48, 0xA3, 0x38, 0x49, 0xFB, 0x92, 0x08, 0x95, 0x7E, 0xF1, 0x45, 0x93, 0x33,
+    0x64, 0x89, 0x89, 0x3C, 0xDA, 0xC4, 0xB9, 0x47, 0x60, 0x85, 0x16, 0x5B, 0xD5, 0x1D, 0xA4, 0xB5,
+    0x8A, 0xC7, 0x7F, 0xFC, 0xD5, 0x94, 0x13, 0x80, 0xE6, 0xAA, 0x4F, 0xE4, 0xFD, 0x50, 0xAE, 0xCA,
+    0x17, 0x29, 0x60, 0xCD, 0x66, 0x61, 0x6C, 0x69, 0xB0, 0xB8, 0x30, 0x2B, 0x19, 0x78, 0xA0, 0x78,
+    0xB6, 0x0A, 0x5E, 0x59, 0xD0, 0x7A, 0xC9, 0xA8, 0x77, 0x6E, 0x40, 0x30, 0x3E, 0x7B, 0xD5, 0x1F,
+    0xF3, 0x18, 0x82, 0x81, 0xAA, 0xB0, 0x47, 0x42, 0xAA, 0x87, 0x7D, 0x4A, 0x5D, 0x0A, 0xCF, 0xDB,
+    0x25, 0x6F, 0x1E, 0x89, 0x9F, 0x68, 0xDD, 0x63, 0xF1, 0xAF, 0xA9, 0x93, 0x5E, 0x91, 0x62, 0x02,
+    0x21, 0x16, 0x38, 0xB6, 0x1A, 0x41, 0x21, 0x2A, 0x32, 0x3F, 0x1A, 0x70, 0x57, 0x1C, 0xFE, 0x1E,
+    0x74, 0x20, 0xDB, 0x22, 0x1D, 0xA7, 0x73, 0x27, 0x22, 0xE4, 0x16, 0xB3, 0x19, 0xA9, 0xDA, 0x30,
+    0x07, 0xDB, 0x66, 0x5E, 0x69, 0xFC, 0x5C, 0x63, 0x16, 0x0B, 0x15, 0x8D, 0xDD, 0x70, 0x13, 0x31,
+    0x94, 0x7A, 0xC0, 0xA0, 0x4D, 0x47, 0x7D, 0xE6, 0x4E, 0x5F, 0x3A, 0x5C, 0xB4, 0xD1, 0x38, 0x32,
+    0x6B, 0x50, 0x5D, 0x81, 0xD5, 0xDB, 0x60, 0xC5, 0x0E, 0x59, 0x43, 0x0A, 0x0A, 0x08, 0xF9, 0x8F,
+    0x83, 0xDC, 0x3E, 0x8D, 0x58, 0x7D, 0xB0, 0x29, 0x4D, 0x37, 0x5A, 0x36, 0x46, 0xF4, 0x25, 0xA3,
+    0x29, 0x01, 0xAF, 0xD2, 0xF8, 0x26, 0xA2, 0xFD, 0x43, 0xC5, 0xD1, 0x70, 0xAB, 0x29, 0x5B, 0x3C,
+    0xB3, 0xAC, 0x36, 0xFC, 0x17, 0x03, 0xB1, 0x7B, 0x80, 0xEC, 0x20, 0xBA, 0x28, 0xA9, 0x72, 0xBF,
+};
+
+static const int TICKS_PER_BEAT = 48;
+static const int TICKS_PER_MEASURE = 192;
+// Duration threshold: notes with duration <= this are taps
+static const int TAP_DURATION_THRESHOLD = 6;
+
+// ---------------------------------------------------------------------------
+// Generic EZ2AC decryption: reverse all bytes, then chunk-based subtract
+// Ported from sub_410A40 / sub_410C90 / sub_4135F0
+// ---------------------------------------------------------------------------
+static std::vector<uint8_t> decryptData(const std::vector<uint8_t>& data,
+                                        const uint8_t* key) {
+    size_t size = data.size();
+    if (size == 0) return {};
+
+    // Step 1: reverse all bytes
+    std::vector<uint8_t> buf(size);
+    for (size_t i = 0; i < size; i++)
+        buf[i] = data[size - 1 - i];
+
+    // Step 2: chunk-based decryption with alternating 8/16 byte chunks
+    std::vector<uint8_t> out(size);
+    size_t pos = 0;
+    int keyIdx = 0;
+    int toggle = 0;
+
+    while (pos < size) {
+        size_t chunkSize;
+        if (pos + 8 <= size) {
+            if (toggle) {
+                chunkSize = (pos + 16 <= size) ? 16 : (size - pos);
+            } else {
+                chunkSize = 8;
+            }
+            toggle ^= 1;
+        } else {
+            chunkSize = size - pos;
+        }
+
+        for (size_t i = 0; i < chunkSize; i++) {
+            uint8_t srcByte = buf[pos + chunkSize - 1 - i];
+            int ki = (int)((chunkSize - 1 - i + keyIdx) % 512);
+            out[pos + i] = (uint8_t)((srcByte - key[ki]) & 0xFF);
+        }
+
+        keyIdx = (keyIdx + (int)chunkSize) % 512;
+        if (chunkSize > 8)
+            pos += chunkSize - 8;
+        pos += 8;
+    }
+
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Decrypt .ez chart data
+// ---------------------------------------------------------------------------
+std::vector<uint8_t> EZ2ACParser::decrypt(const std::vector<uint8_t>& data) {
+    return decryptData(data, KEY_EZ);
+}
+
+// ---------------------------------------------------------------------------
+// File extension check
+// ---------------------------------------------------------------------------
+bool EZ2ACParser::isEZ2ACFile(const std::string& filepath) {
+    size_t dot = filepath.rfind('.');
+    if (dot == std::string::npos) return false;
+    std::string ext = filepath.substr(dot);
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    return ext == ".ez";
+}
+
+// ---------------------------------------------------------------------------
+// Detect game mode from .ez filename
+// e.g. "1st_5keymix.ez" -> FiveKey, "Anemia_clubmix.ez" -> ClubMix
+// ---------------------------------------------------------------------------
+EZ2ACMode EZ2ACParser::detectMode(const std::string& filename) {
+    std::string name = filename;
+    size_t slash = name.find_last_of("/\\");
+    if (slash != std::string::npos) name = name.substr(slash + 1);
+    size_t dot = name.rfind('.');
+    if (dot != std::string::npos) name = name.substr(0, dot);
+    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+
+    // Match mode suffix (longer matches first to avoid partial hits)
+    if (name.find("14radiomix") != std::string::npos) return EZ2ACMode::FourteenRadioMix;
+    if (name.find("10radiomix") != std::string::npos) return EZ2ACMode::TenRadioMix;
+    if (name.find("7streetmix") != std::string::npos) return EZ2ACMode::SevenStreetMix;
+    if (name.find("5radiomix") != std::string::npos)  return EZ2ACMode::FiveRadioMix;
+    if (name.find("5keymix") != std::string::npos)     return EZ2ACMode::FiveKey;
+    if (name.find("scratchmix") != std::string::npos)  return EZ2ACMode::ScratchMix;
+    if (name.find("rubymix") != std::string::npos)     return EZ2ACMode::RubyMix;
+    if (name.find("streetmix") != std::string::npos)   return EZ2ACMode::StreetMix;
+    if (name.find("radiomix") != std::string::npos)    return EZ2ACMode::RadioMix;
+    if (name.find("clubmix") != std::string::npos)     return EZ2ACMode::ClubMix;
+    if (name.find("spacemix") != std::string::npos)    return EZ2ACMode::SpaceMix;
+    if (name.find("ez2catch") != std::string::npos)    return EZ2ACMode::Catch;
+    if (name.find("catch") != std::string::npos)       return EZ2ACMode::Catch;
+    return EZ2ACMode::Unknown;
+}
+
+const char* EZ2ACParser::modeName(EZ2ACMode mode) {
+    switch (mode) {
+        case EZ2ACMode::FiveKey:        return "5K";
+        case EZ2ACMode::ScratchMix:     return "5K Scratch";
+        case EZ2ACMode::RubyMix:        return "7K Ruby";
+        case EZ2ACMode::StreetMix:      return "7K Street";
+        case EZ2ACMode::FiveRadioMix:   return "7K 5Radio";
+        case EZ2ACMode::SevenStreetMix: return "9K 7Street";
+        case EZ2ACMode::RadioMix:       return "9K Radio";
+        case EZ2ACMode::ClubMix:        return "10K Club";
+        case EZ2ACMode::TenRadioMix:    return "10K 10Radio";
+        case EZ2ACMode::SpaceMix:       return "16K Space";
+        case EZ2ACMode::FourteenRadioMix: return "16K 14Radio";
+        case EZ2ACMode::Catch:          return "Catch";
+        default:                        return "Unknown";
+    }
+}
+
+int EZ2ACParser::modeKeyCount(EZ2ACMode mode) {
+    switch (mode) {
+        case EZ2ACMode::FiveKey:
+        case EZ2ACMode::ScratchMix:     return 5;
+        case EZ2ACMode::RubyMix:
+        case EZ2ACMode::StreetMix:
+        case EZ2ACMode::FiveRadioMix:   return 7;
+        case EZ2ACMode::SevenStreetMix:
+        case EZ2ACMode::RadioMix:       return 9;
+        case EZ2ACMode::ClubMix:
+        case EZ2ACMode::TenRadioMix:    return 10;
+        case EZ2ACMode::SpaceMix:
+        case EZ2ACMode::FourteenRadioMix: return 16;
+        default:                        return 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Playable channel list per mode
+// Position in returned vector = lane index, value = EZFF channel number
+// ---------------------------------------------------------------------------
+std::vector<int> EZ2ACParser::getPlayableChannels(EZ2ACMode mode) {
+    switch (mode) {
+        case EZ2ACMode::FiveKey:
+        case EZ2ACMode::ScratchMix:
+            return {3, 4, 5, 6, 7};                         // 5K
+        case EZ2ACMode::RubyMix:
+        case EZ2ACMode::StreetMix:
+        case EZ2ACMode::FiveRadioMix:
+            return {3, 4, 5, 6, 7, 10, 11};                 // 7K
+        case EZ2ACMode::SevenStreetMix:
+        case EZ2ACMode::RadioMix:
+            return {3, 4, 5, 6, 7, 8, 9, 10, 11};           // 9K
+        case EZ2ACMode::ClubMix:
+        case EZ2ACMode::TenRadioMix:
+            return {3, 4, 5, 6, 7, 10, 11, 12, 13, 14};     // 10K
+        case EZ2ACMode::SpaceMix:
+        case EZ2ACMode::FourteenRadioMix:
+            // 16K: left side Ch3-10, right side Ch12-19 (Ch11 gap)
+            return {3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 19};
+        default:
+            return {};
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tick -> milliseconds conversion with BPM timeline
+// ---------------------------------------------------------------------------
+double EZ2ACParser::tickToMs(uint32_t tick, const std::vector<BPMEvent>& bpmTimeline,
+                             int ticksPerBeat) {
+    if (bpmTimeline.empty()) return 0.0;
+
+    const BPMEvent* active = &bpmTimeline[0];
+    for (size_t i = 1; i < bpmTimeline.size(); i++) {
+        if (bpmTimeline[i].tick <= tick)
+            active = &bpmTimeline[i];
+        else
+            break;
+    }
+
+    double msPerTick = 60000.0 / (active->bpm * ticksPerBeat);
+    return active->timeMs + (tick - active->tick) * msPerTick;
+}
+
+// ---------------------------------------------------------------------------
+// Parse .ezi keysound index file
+// After decryption, format is lines of: <sample_id> <flag> <filename.wav>
+// sample_id is 1-based. sampleMap is indexed by sample_id directly.
+// ---------------------------------------------------------------------------
+bool EZ2ACParser::parseEZI(const std::string& eziPath,
+                           std::vector<std::string>& sampleMap) {
+    std::ifstream file(eziPath, std::ios::binary);
+    if (!file) return false;
+
+    std::vector<uint8_t> raw((std::istreambuf_iterator<char>(file)),
+                              std::istreambuf_iterator<char>());
+    file.close();
+    if (raw.empty()) return false;
+
+    std::vector<uint8_t> dec = decryptData(raw, KEY_EZI);
+
+    std::string text(dec.begin(), dec.end());
+    std::istringstream ss(text);
+    std::string line;
+    sampleMap.clear();
+    while (std::getline(ss, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.empty()) continue;
+
+        // Format: "<id> <flag> <filename>"
+        std::istringstream ls(line);
+        int id = 0, flag = 0;
+        std::string filename;
+        if (!(ls >> id >> flag >> filename)) continue;
+
+        // Grow vector to fit this id
+        if (id >= (int)sampleMap.size())
+            sampleMap.resize(id + 1);
+        sampleMap[id] = filename;
+    }
+
+    return !sampleMap.empty();
+}
+
+// ---------------------------------------------------------------------------
+// Parse .ini difficulty metadata (decrypt with KEY_INI, find Level=XX)
+// ---------------------------------------------------------------------------
+int EZ2ACParser::parseDifficultyLevel(const std::string& iniPath) {
+    std::ifstream file(iniPath, std::ios::binary);
+    if (!file) return 0;
+
+    std::vector<uint8_t> raw((std::istreambuf_iterator<char>(file)),
+                              std::istreambuf_iterator<char>());
+    file.close();
+    if (raw.empty()) return 0;
+
+    std::vector<uint8_t> dec = decryptData(raw, KEY_INI);
+
+    std::string text(dec.begin(), dec.end());
+    std::istringstream ss(text);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        std::string lower = line;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        size_t pos = lower.find("level=");
+        if (pos != std::string::npos) {
+            std::string val = line.substr(pos + 6);
+            try { return std::stoi(val); } catch (...) {}
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Parse EZFF binary chart data
+// ---------------------------------------------------------------------------
+bool EZ2ACParser::parseEZFF(const std::vector<uint8_t>& data,
+                            const std::string& filepath,
+                            EZ2ACMode mode, BeatmapInfo& info) {
+    if (data.size() < 150) return false;
+    if (memcmp(data.data(), "EZFF", 4) != 0) return false;
+
+    // Header (150 bytes)
+    // offset 6-69: name block 1, offset 70-133: name block 2
+    std::string name1(data.begin() + 6, data.begin() + 70);
+    name1 = name1.c_str(); // trim at null
+    std::string name2(data.begin() + 70, data.begin() + 134);
+    name2 = name2.c_str();
+
+    // offset 136: header BPM stored as float (not ticks_per_measure)
+    // Tick resolution is always 48 ticks/beat (192 ticks/measure)
+    int ticksPerBeat = TICKS_PER_BEAT;
+
+    // offset 140: channel count (uint16, max 96)
+    uint16_t channelCount;
+    memcpy(&channelCount, &data[140], 2);
+    if (channelCount > 96) channelCount = 96;
+
+    // Build channel -> lane lookup (-1 = not playable)
+    std::vector<int> playableChannels = getPlayableChannels(mode);
+    int channelToLane[96];
+    memset(channelToLane, -1, sizeof(channelToLane));
+    for (int i = 0; i < (int)playableChannels.size(); i++) {
+        int ch = playableChannels[i];
+        if (ch < 96) channelToLane[ch] = i;
+    }
+
+    // Load .ezi keysound map: match by base name (e.g. foo.ez -> foo.ezi)
+    std::vector<std::string> sampleMap;
+    {
+        fs::path ezPath(filepath);
+        fs::path eziPath = ezPath.parent_path() / (ezPath.stem().string() + ".ezi");
+        if (fs::exists(eziPath)) {
+            parseEZI(eziPath.string(), sampleMap);
+        } else {
+            // Fallback: case-insensitive search
+            std::string targetStem = ezPath.stem().string();
+            std::string targetLower = targetStem;
+            std::transform(targetLower.begin(), targetLower.end(), targetLower.begin(), ::tolower);
+            for (auto& entry : fs::directory_iterator(ezPath.parent_path())) {
+                if (!entry.is_regular_file()) continue;
+                std::string ext = entry.path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if (ext != ".ezi") continue;
+                std::string stem = entry.path().stem().string();
+                std::transform(stem.begin(), stem.end(), stem.begin(), ::tolower);
+                if (stem == targetLower) {
+                    parseEZI(entry.path().string(), sampleMap);
+                    break;
+                }
+            }
+        }
+    }
+
+    // First pass: collect BPM events from all channels (type 3 and type 5)
+    std::vector<BPMEvent> bpmTimeline;
+    {
+        size_t offset = 150;
+        for (int ch = 0; ch < channelCount; ch++) {
+            if (offset + 78 > data.size()) break;
+            uint32_t dataSize;
+            memcpy(&dataSize, &data[offset + 74], 4);
+            offset += 78;
+            if (offset + dataSize > data.size()) break;
+
+            int noteCount = (int)(dataSize / 13);
+            for (int n = 0; n < noteCount; n++) {
+                size_t noff = offset + n * 13;
+                uint32_t position;
+                memcpy(&position, &data[noff], 4);
+                uint8_t type = data[noff + 4];
+
+                if (type == 3 || type == 5) {
+                    float bpm;
+                    memcpy(&bpm, &data[noff + 5], 4);
+                    if (bpm > 0.0f && bpm < 10000.0f) {
+                        bpmTimeline.push_back({position, bpm, 0.0});
+                    }
+                }
+            }
+            offset += dataSize;
+        }
+    }
+
+    // Sort BPM events by tick, remove duplicates at same tick (keep last)
+    std::sort(bpmTimeline.begin(), bpmTimeline.end(),
+              [](const BPMEvent& a, const BPMEvent& b) { return a.tick < b.tick; });
+    for (int i = (int)bpmTimeline.size() - 2; i >= 0; i--) {
+        if (bpmTimeline[i].tick == bpmTimeline[i + 1].tick)
+            bpmTimeline.erase(bpmTimeline.begin() + i);
+    }
+
+    // Compute absolute times for BPM events
+    if (!bpmTimeline.empty()) {
+        bpmTimeline[0].timeMs = 0.0;
+        for (size_t i = 1; i < bpmTimeline.size(); i++) {
+            double msPerTick = 60000.0 / (bpmTimeline[i - 1].bpm * ticksPerBeat);
+            uint32_t deltaTick = bpmTimeline[i].tick - bpmTimeline[i - 1].tick;
+            bpmTimeline[i].timeMs = bpmTimeline[i - 1].timeMs + deltaTick * msPerTick;
+        }
+    }
+
+    // Build timing points for the game engine
+    for (auto& ev : bpmTimeline) {
+        TimingPoint tp;
+        tp.time = ev.timeMs;
+        tp.beatLength = 60000.0 / ev.bpm;
+        tp.uninherited = true;
+        tp.effectiveBeatLength = tp.beatLength;
+        tp.volume = 100;
+        info.timingPoints.push_back(tp);
+    }
+
+    // Second pass: parse notes from all channels
+    {
+        size_t offset = 150;
+        for (int ch = 0; ch < channelCount; ch++) {
+            if (offset + 78 > data.size()) break;
+            uint32_t dataSize;
+            memcpy(&dataSize, &data[offset + 74], 4);
+            offset += 78;
+            if (offset + dataSize > data.size()) break;
+
+            int lane = (ch < 96) ? channelToLane[ch] : -1;
+            bool isPlayable = (lane >= 0);
+            bool isBGM = (ch >= 22 && !isPlayable);
+
+            int noteCount = (int)(dataSize / 13);
+            for (int n = 0; n < noteCount; n++) {
+                size_t noff = offset + n * 13;
+                if (noff + 13 > data.size()) break;
+
+                uint32_t position;
+                memcpy(&position, &data[noff], 4);
+                uint8_t type = data[noff + 4];
+                if (type != 1) continue; // only note events
+
+                uint16_t sampleId;
+                memcpy(&sampleId, &data[noff + 5], 2);
+                uint8_t volume = data[noff + 7];
+                uint16_t duration;
+                memcpy(&duration, &data[noff + 10], 2);
+
+                double timeMs = tickToMs(position, bpmTimeline, ticksPerBeat);
+                int64_t noteTime = (int64_t)std::round(timeMs);
+
+                std::string sampleFilename;
+                if (sampleId < sampleMap.size() && !sampleMap[sampleId].empty())
+                    sampleFilename = sampleMap[sampleId];
+
+                if (isPlayable) {
+                    bool isHold = (duration > TAP_DURATION_THRESHOLD);
+                    int64_t endTime = 0;
+                    if (isHold) {
+                        double endMs = tickToMs(position + duration, bpmTimeline, ticksPerBeat);
+                        endTime = (int64_t)std::round(endMs);
+                    }
+
+                    Note note(lane, noteTime, isHold, endTime);
+                    note.customIndex = sampleId;
+                    note.filename = sampleFilename;
+                    note.volume = (volume > 0) ? (int)(volume * 100 / 127) : 100;
+                    info.notes.push_back(note);
+                } else if (isBGM) {
+                    StoryboardSample ss;
+                    ss.time = noteTime;
+                    ss.filename = sampleFilename;
+                    ss.volume = (volume > 0) ? (int)(volume * 100 / 127) : 100;
+                    info.storyboardSamples.push_back(ss);
+                }
+            }
+            offset += dataSize;
+        }
+    }
+
+    // Sort notes and samples by time
+    std::sort(info.notes.begin(), info.notes.end(),
+              [](const Note& a, const Note& b) { return a.time < b.time; });
+    std::sort(info.storyboardSamples.begin(), info.storyboardSamples.end(),
+              [](const StoryboardSample& a, const StoryboardSample& b) {
+                  return a.time < b.time;
+              });
+
+    // Metadata
+    info.title = name1.empty() ? name2 : name1;
+    info.version = modeName(mode);
+    info.mode = 3; // mania
+    info.keyCount = modeKeyCount(mode);
+    info.od = 8.0f;
+    info.hp = 8.0f;
+    info.cs = 0;
+    info.ar = 0;
+    info.sliderMultiplier = 0;
+    info.totalObjectCount = (int)info.notes.size();
+    info.endTimeObjectCount = 0;
+    for (auto& n : info.notes) {
+        if (n.isHold) info.endTimeObjectCount++;
+    }
+
+    // Try to read difficulty level from .ini in same directory
+    {
+        fs::path dir = fs::path(filepath).parent_path();
+        for (auto& entry : fs::directory_iterator(dir)) {
+            if (!entry.is_regular_file()) continue;
+            std::string ext = entry.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext == ".ini") {
+                int level = parseDifficultyLevel(entry.path().string());
+                if (level > 0)
+                    info.od = (float)std::min(level, 10);
+                break;
+            }
+        }
+    }
+
+    return !info.notes.empty();
+}
+
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+bool EZ2ACParser::parse(const std::string& filepath, BeatmapInfo& info) {
+    EZ2ACMode mode = detectMode(filepath);
+
+    // Skip unsupported modes
+    if (mode == EZ2ACMode::Catch || mode == EZ2ACMode::Unknown) {
+        return false;
+    }
+
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file) return false;
+
+    std::vector<uint8_t> raw((std::istreambuf_iterator<char>(file)),
+                              std::istreambuf_iterator<char>());
+    file.close();
+    if (raw.empty()) return false;
+
+    std::vector<uint8_t> dec = decrypt(raw);
+    if (dec.size() < 4 || memcmp(dec.data(), "EZFF", 4) != 0)
+        return false;
+
+    if (!parseEZFF(dec, filepath, mode, info))
+        return false;
+
+    info.beatmapHash = OsuParser::calculateMD5(filepath);
+    info.audioFilename = ""; // keysound-only, no separate BGM
+
+    fs::path p(filepath);
+    std::string dirName = p.parent_path().filename().string();
+    if (info.artist.empty()) info.artist = "EZ2AC";
+    if (info.creator.empty()) info.creator = dirName;
+
+    return true;
+}

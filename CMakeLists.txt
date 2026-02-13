@@ -93,6 +93,7 @@ endif()
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE
         /utf-8           # UTF-8 source and execution charset
+        /bigobj          # Allow large object files (Game.cpp + inline DBs)
         /wd4819          # Disable warning about codepage
         /EHsc            # Exception handling
         /O2              # Optimize for speed (Release)
@@ -141,6 +142,7 @@ if(PLATFORM_WINDOWS)
         avformat
         avutil
         swscale
+        swresample
         # Windows system libraries
         shell32
         advapi32

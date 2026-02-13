@@ -20,8 +20,8 @@ public:
     PakExtractor();
     ~PakExtractor();
 
-    // Load keys from directory
-    bool loadKeys(const std::string& keyDir);
+    // Load embedded decryption keys
+    bool loadKeys();
 
     // Open and parse a .pak file
     bool open(const std::string& pakPath);

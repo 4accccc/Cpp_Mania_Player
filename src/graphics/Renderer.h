@@ -67,11 +67,13 @@ public:
     void renderTextClipped(const char* text, float x, float y, float maxWidth);
     int getTextWidth(const char* text);  // Get pixel width of text string
     void renderLabel(const char* text, float x, float y);
-    int renderDropdown(const char* label, const char** options, int optionCount, int selected, float x, float y, float w, int mouseX, int mouseY, bool clicked, bool& expanded);
+    int renderDropdown(const char* label, const char** options, int optionCount, int selected, float x, float y, float w, int mouseX, int mouseY, bool& clicked, bool& expanded);
+    void renderDropdownOverlay();  // Call after all controls to draw expanded dropdown on top
     bool renderRadioButton(const char* label, bool selected, float x, float y, int mouseX, int mouseY, bool clicked);
     bool renderClickableLabel(const char* text, float x, float y, int mouseX, int mouseY, bool clicked);
     void renderPopupWindow(float x, float y, float w, float h);
     void renderPauseMenu(int selection, float alpha = 1.0f);
+    void renderPauseCountdown(float seconds, float alpha);
     void renderDeathMenu(int selection, float slowdown, float alpha = 1.0f);
     void renderSkipPrompt();  // "Press Space to skip..." prompt
     bool renderTextInput(const char* label, std::string& text, float x, float y, float w, int mouseX, int mouseY, bool clicked, bool& editing, int& cursorPos);
@@ -138,6 +140,20 @@ private:
     float getLaneX(int lane) const;
     float getLaneWidth(int lane) const;
     float getColumnSpacing(int lane) const;
+
+    // Pending dropdown overlay (deferred rendering so it draws on top of all controls)
+    struct PendingDropdown {
+        bool active = false;
+        std::vector<std::string> options;
+        int optionCount = 0;
+        int selected = -1;
+        float x = 0, y = 0, w = 0, h = 30;
+        int mouseX = 0, mouseY = 0;
+        bool* clickedPtr = nullptr;
+        bool* expandedPtr = nullptr;
+        int* resultPtr = nullptr;
+    } pendingDropdown_;
+
     int getHoldHeadY(const Note& note, int naturalY, int64_t currentTime, int scrollSpeed, int releaseNaturalY) const;
     double getSVMultiplier(int64_t time, const std::vector<TimingPoint>& timingPoints) const;
     double getBaseBeatLength(int64_t time, const std::vector<TimingPoint>& timingPoints) const;

@@ -299,7 +299,7 @@ double OsuStable2022StarRating::calculate(const std::vector<Note>& notes, int ke
         DiffObj& curr = objects[i];
         const DiffObj& prev = objects[i - 1];
 
-        double deltaTime = static_cast<double>(curr.startTime - prev.startTime) / clockRate;
+        double deltaTime = static_cast<double>(curr.startTime - prev.startTime);
         double streamDecay = std::pow(STREAM_DECAY_BASE, deltaTime / 1000.0);
         double overallDecay = std::pow(OVERALL_DECAY_BASE, deltaTime / 1000.0);
 
@@ -335,7 +335,7 @@ double OsuStable2022StarRating::calculate(const std::vector<Note>& notes, int ke
     }
 
     // Calculate weighted sum (vmethod_7 in GClass274)
-    double sectionLength = 400.0 * clockRate;
+    double sectionLength = 400.0;
     std::vector<double> strainPeaks;
     double sectionEnd = sectionLength;
     double currentStrain = 0.0;

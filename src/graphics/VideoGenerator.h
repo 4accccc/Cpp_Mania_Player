@@ -77,6 +77,7 @@ private:
     // Rendering helpers
     int timeToY(int64_t time) const;
     void renderLongImage(std::vector<uint8_t>& pixels);
+    void renderLongImageRegion(std::vector<uint8_t>& pixels, int regionTop, int regionHeight);
     void getJudgementColor(int judgement, uint8_t& r, uint8_t& g, uint8_t& b);
     void setPixel(uint8_t* p, int imgW, int imgH, int x, int y,
                   uint8_t r, uint8_t g, uint8_t b);

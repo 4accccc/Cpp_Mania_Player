@@ -398,7 +398,7 @@ PakExtractor::~PakExtractor() {
     close();
 }
 
-bool PakExtractor::loadKeys(const std::string& keyDir) {
+bool PakExtractor::loadKeys() {
     // Use embedded keys instead of loading from files
     key1a_.assign(EMBEDDED_KEY1A, EMBEDDED_KEY1A + sizeof(EMBEDDED_KEY1A));
     key1b_.assign(EMBEDDED_KEY1B, EMBEDDED_KEY1B + sizeof(EMBEDDED_KEY1B));

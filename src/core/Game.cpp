@@ -11,8 +11,14 @@
 #include "MuSynxParser.h"
 #include "AcbParser.h"
 #include "2dxParser.h"
+#include "2dxSoundParser.h"
+#include "S3PParser.h"
 #include "StepManiaParser.h"
+#include "VoxParser.h"
+#include "EZ2ACParser.h"
+#include "SDVXSongDB.h"
 #include "IIDXSongDB.h"
+#include "EZ2ACSongDB.h"
 #include "StarRating.h"
 #include "SongIndex.h"
 #include "OsuMods.h"
@@ -27,7 +33,18 @@
 #include <cmath>
 #include <numeric>
 #include <algorithm>
+#include <iomanip>
 #include <map>
+#include <set>
+
+// FFmpeg for audio transcoding (WMA/HCA -> WAV)
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libswresample/swresample.h>
+#include <libavutil/opt.h>
+#include <libavutil/channel_layout.h>
+}
 
 // ICU for locale-aware string comparison
 #include <unicode/ucol.h>
@@ -214,11 +231,14 @@ Game::Game() : state(GameState::Menu), running(false), musicStarted(false), hasB
                songSelectTransition(false), songSelectTransitionStart(0),
                previewFading(false), previewFadeIn(true), previewFadeStart(0),
                previewFadeDuration(200), previewTargetIndex(-1), previewTargetDiffIndex(-1),
-               hasBga(false), currentBgaEntry(0) {
+               hasBga(false), currentBgaEntry(0),
+               isBmsBga(false), currentStoryboardSample(0), lastJudgementIndex(0),
+               pauseGameTime(0), deathMenuSelection(1), deathTime(0), deathSlowdown(1.0f),
+               skipTargetTime(0), canSkip(false) {
     for (int i = 0; i < 6; i++) {
         judgementCounts[i] = 0;
     }
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 18; i++) {
         laneKeyDown[i] = false;
     }
     // Set default colors for 4k
@@ -299,6 +319,7 @@ bool Game::init() {
 
     // Initialize key sound manager
     keySoundManager.setAudioManager(&audio);
+    keySoundManager.setKeysoundVolume(settings.keysoundVolume);
 
     // Initialize skin manager
     renderer.setSkinManager(&skinManager);
@@ -316,7 +337,7 @@ std::string Game::openFileDialog() {
     return FileDialog::openFile(
         "Select Beatmap",
         nullptr,
-        {"*.osu", "*.bytes", "*.ojn", "*.pt", "*.bms", "*.bme", "*.bml", "*.pms", "*.1", "*.mc", "*.txt", "*.sm", "*.ssc"},
+        {"*.osu", "*.bytes", "*.ojn", "*.pt", "*.bms", "*.bme", "*.bml", "*.pms", "*.1", "*.mc", "*.txt", "*.sm", "*.ssc", "*.ez"},
         "Beatmap Files"
     );
 }
@@ -352,12 +373,1261 @@ std::string Game::openSkinFolderDialog() {
     return FileDialog::selectFolder("Select Skin Folder");
 }
 
+// ============================================================
+// Export Beatmap to .osz (ZIP Store)
+// ============================================================
+
+// CRC-32 lookup table
+static uint32_t crc32Table[256];
+static bool crc32TableInit = false;
+static void initCRC32Table() {
+    if (crc32TableInit) return;
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t c = i;
+        for (int j = 0; j < 8; j++)
+            c = (c & 1) ? (0xEDB88320 ^ (c >> 1)) : (c >> 1);
+        crc32Table[i] = c;
+    }
+    crc32TableInit = true;
+}
+static uint32_t calcCRC32(const void* data, size_t size) {
+    initCRC32Table();
+    uint32_t crc = 0xFFFFFFFF;
+    const uint8_t* p = (const uint8_t*)data;
+    for (size_t i = 0; i < size; i++)
+        crc = crc32Table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+    return crc ^ 0xFFFFFFFF;
+}
+
+// Minimal ZIP Store writer
+struct ZipEntry {
+    std::string name;
+    std::vector<uint8_t> data;
+    uint32_t crc;
+    uint32_t localOffset;
+};
+
+static bool writeZipStore(const std::string& path, const std::vector<ZipEntry>& entries) {
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return false;
+
+    auto write16 = [&](uint16_t v) { f.write((char*)&v, 2); };
+    auto write32 = [&](uint32_t v) { f.write((char*)&v, 4); };
+
+    // Local file headers + data
+    std::vector<uint32_t> offsets(entries.size());
+    for (size_t i = 0; i < entries.size(); i++) {
+        offsets[i] = (uint32_t)f.tellp();
+        uint32_t sz = (uint32_t)entries[i].data.size();
+        write32(0x04034b50);  // signature
+        write16(20);          // version needed
+        write16(0);           // flags
+        write16(0);           // compression (Store)
+        write16(0);           // mod time
+        write16(0);           // mod date
+        write32(entries[i].crc);
+        write32(sz);          // compressed size
+        write32(sz);          // uncompressed size
+        write16((uint16_t)entries[i].name.size());
+        write16(0);           // extra field length
+        f.write(entries[i].name.c_str(), entries[i].name.size());
+        if (sz > 0)
+            f.write((const char*)entries[i].data.data(), sz);
+    }
+
+    // Central directory
+    uint32_t cdOffset = (uint32_t)f.tellp();
+    for (size_t i = 0; i < entries.size(); i++) {
+        uint32_t sz = (uint32_t)entries[i].data.size();
+        write32(0x02014b50);  // signature
+        write16(20);          // version made by
+        write16(20);          // version needed
+        write16(0);           // flags
+        write16(0);           // compression
+        write16(0);           // mod time
+        write16(0);           // mod date
+        write32(entries[i].crc);
+        write32(sz);
+        write32(sz);
+        write16((uint16_t)entries[i].name.size());
+        write16(0);           // extra field length
+        write16(0);           // comment length
+        write16(0);           // disk number
+        write16(0);           // internal attributes
+        write32(0);           // external attributes
+        write32(offsets[i]);  // local header offset
+        f.write(entries[i].name.c_str(), entries[i].name.size());
+    }
+    uint32_t cdSize = (uint32_t)f.tellp() - cdOffset;
+
+    // End of central directory
+    write32(0x06054b50);
+    write16(0);  // disk number
+    write16(0);  // central dir disk
+    write16((uint16_t)entries.size());
+    write16((uint16_t)entries.size());
+    write32(cdSize);
+    write32(cdOffset);
+    write16(0);  // comment length
+
+    return f.good();
+}
+
+// Sanitize filename: remove invalid path characters
+static std::string sanitizeFilename(const std::string& name) {
+    std::string out;
+    out.reserve(name.size());
+    for (char c : name) {
+        if (c == '\\' || c == '/' || c == ':' || c == '*' ||
+            c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+            out += '_';
+        else
+            out += c;
+    }
+    // Trim trailing spaces/dots (Windows restriction)
+    while (!out.empty() && (out.back() == ' ' || out.back() == '.'))
+        out.pop_back();
+    if (out.empty()) out = "export";
+    return out;
+}
+
+// Generate .osu file content from BeatmapInfo
+static std::string generateOsuFile(const BeatmapInfo& info, const std::string& audioFilename) {
+    std::ostringstream osu;
+    osu << "osu file format v14\n//Exported by Mania Player\n\n";
+
+    // [General]
+    osu << "[General]\n";
+    osu << "AudioFilename: " << audioFilename << "\n";
+    osu << "AudioLeadIn: 0\n";
+    osu << "PreviewTime: " << info.previewTime << "\n";
+    osu << "Countdown: 0\n";
+    osu << "SampleSet: Normal\n";
+    osu << "StackLeniency: 0.7\n";
+    osu << "Mode: 3\n";
+    osu << "LetterboxInBreaks: 0\n";
+    osu << "SpecialStyle: 0\n";
+    osu << "WidescreenStoryboard: 0\n\n";
+
+    // [Editor]
+    osu << "[Editor]\n";
+    osu << "DistanceSpacing: 1\n";
+    osu << "BeatDivisor: 4\n";
+    osu << "GridSize: 4\n";
+    osu << "TimelineZoom: 1\n\n";
+
+    // [Metadata]
+    osu << "[Metadata]\n";
+    osu << "Title:" << (info.title.empty() ? "Unknown" : info.title) << "\n";
+    osu << "TitleUnicode:" << (info.titleUnicode.empty() ? info.title : info.titleUnicode) << "\n";
+    osu << "Artist:" << (info.artist.empty() ? "Unknown" : info.artist) << "\n";
+    osu << "ArtistUnicode:" << (info.artistUnicode.empty() ? info.artist : info.artistUnicode) << "\n";
+    osu << "Creator:" << (info.creator.empty() ? "Unknown" : info.creator) << "\n";
+    osu << "Version:" << (info.version.empty() ? "Normal" : info.version) << "\n";
+    osu << "Source:" << info.source << "\n";
+    osu << "Tags:" << info.tags << "\n";
+    osu << "BeatmapID:0\n";
+    osu << "BeatmapSetID:-1\n\n";
+
+    // [Difficulty]
+    osu << "[Difficulty]\n";
+    osu << "HPDrainRate:" << info.hp << "\n";
+    osu << "CircleSize:" << info.keyCount << "\n";
+    osu << "OverallDifficulty:" << info.od << "\n";
+    osu << "ApproachRate:5\n";
+    osu << "SliderMultiplier:1.4\n";
+    osu << "SliderTickRate:1\n\n";
+
+    // [Events]
+    osu << "[Events]\n";
+    osu << "//Background and Video events\n";
+    osu << "//Break Periods\n";
+    osu << "//Storyboard Sound Samples\n";
+    for (const auto& ss : info.storyboardSamples) {
+        if (!ss.filename.empty()) {
+            // Use just the filename part (no directory)
+            std::string fn = ss.filename;
+            size_t sep = fn.find_last_of("/\\");
+            if (sep != std::string::npos) fn = fn.substr(sep + 1);
+            osu << "Sample," << ss.time << "," << ss.layer
+                << ",\"" << fn << "\"," << ss.volume << "\n";
+        }
+    }
+    osu << "\n";
+
+    // [TimingPoints]
+    osu << "[TimingPoints]\n";
+    // osu! requires at least one uninherited timing point to load
+    if (info.timingPoints.empty()) {
+        osu << "0,500,4,1,0,100,1,0\n";  // 120 BPM default
+    }
+    for (const auto& tp : info.timingPoints) {
+        int sampleSetInt = 0;
+        if (tp.sampleSet == SampleSet::Normal) sampleSetInt = 1;
+        else if (tp.sampleSet == SampleSet::Soft) sampleSetInt = 2;
+        else if (tp.sampleSet == SampleSet::Drum) sampleSetInt = 3;
+
+        osu << std::fixed << std::setprecision(6)
+            << tp.time << "," << tp.beatLength << ",4,"
+            << sampleSetInt << ",0," << tp.volume << ","
+            << (tp.uninherited ? 1 : 0) << ",0\n";
+    }
+    osu << "\n";
+
+    // [HitObjects]
+    osu << "[HitObjects]\n";
+    int keyCount = info.keyCount;
+    if (keyCount <= 0) keyCount = 4;
+
+    for (const auto& note : info.notes) {
+        if (note.isFakeNote) continue;
+
+        // Lane to X coordinate
+        int x = (int)(note.lane * 512.0 / keyCount + 256.0 / keyCount);
+        if (x < 0) x = 0;
+        if (x > 511) x = 511;
+
+        int hitsound = 0;
+        if (note.hasWhistle) hitsound |= 2;
+        if (note.hasFinish) hitsound |= 4;
+        if (note.hasClap) hitsound |= 8;
+
+        // Filename: strip directory path
+        std::string fn = note.filename;
+        size_t sep = fn.find_last_of("/\\");
+        if (sep != std::string::npos) fn = fn.substr(sep + 1);
+
+        std::string tailFn = note.tailFilename;
+        sep = tailFn.find_last_of("/\\");
+        if (sep != std::string::npos) tailFn = tailFn.substr(sep + 1);
+
+        if (note.isHold && note.endTime > note.time) {
+            // Hold: x,192,time,128,hitsound,endTime:sampleSet:additions:customIndex:volume:filename
+            osu << x << ",192," << note.time << ",128," << hitsound << ","
+                << note.endTime << ":"
+                << (int)note.sampleSet << ":" << (int)note.additions << ":"
+                << note.customIndex << ":" << note.volume << ":" << fn << "\n";
+        } else {
+            // Normal: x,192,time,1,hitsound,sampleSet:additions:customIndex:volume:filename
+            osu << x << ",192," << note.time << ",1," << hitsound << ","
+                << (int)note.sampleSet << ":" << (int)note.additions << ":"
+                << note.customIndex << ":" << note.volume << ":" << fn << "\n";
+        }
+    }
+
+    return osu.str();
+}
+
+// Convert EZ2AC SSF format (16-byte header + raw PCM) to WAV in memory
+static std::vector<uint8_t> convertSSFtoWAV(const std::vector<uint8_t>& ssfData) {
+    if (ssfData.size() <= 16) return {};
+
+    uint16_t rawFmt, rawRate, rawCh, rawBlockAlign, rawBits;
+    memcpy(&rawFmt, &ssfData[0], 2);
+    memcpy(&rawRate, &ssfData[2], 2);
+    memcpy(&rawCh, &ssfData[8], 2);
+    memcpy(&rawBlockAlign, &ssfData[10], 2);
+    memcpy(&rawBits, &ssfData[12], 2);
+
+    uint32_t sampleRate32 = rawRate ? rawRate : 44100;
+    uint16_t channels = rawCh ? rawCh : 1;
+    uint16_t bitsPerSample = rawBits ? rawBits : 16;
+    uint32_t rawPcmSize = (uint32_t)(ssfData.size() - 16);
+    const uint8_t* rawPcm = &ssfData[16];
+
+    std::vector<uint8_t> convertedPcm;
+    uint32_t pcmSize = rawPcmSize;
+    const uint8_t* pcmPtr = rawPcm;
+
+    int bytesPerSample = rawBlockAlign ? (rawBlockAlign / (channels ? channels : 1)) : (bitsPerSample / 8);
+    if (rawFmt == 2 && bytesPerSample == 4) {
+        uint32_t sampleCount = rawPcmSize / (4 * channels);
+        convertedPcm.resize(sampleCount * 2 * channels);
+        for (uint32_t i = 0; i < sampleCount * channels; i++) {
+            uint16_t hi;
+            memcpy(&hi, rawPcm + i * 4 + 2, 2);
+            memcpy(&convertedPcm[i * 2], &hi, 2);
+        }
+        pcmPtr = convertedPcm.data();
+        pcmSize = (uint32_t)convertedPcm.size();
+        bitsPerSample = 16;
+    }
+
+    uint16_t blockAlign = channels * (bitsPerSample / 8);
+    uint32_t byteRate = sampleRate32 * blockAlign;
+
+    std::vector<uint8_t> wav(44 + pcmSize, 0);
+    memcpy(&wav[0], "RIFF", 4);
+    uint32_t riffSize = 36 + pcmSize;
+    memcpy(&wav[4], &riffSize, 4);
+    memcpy(&wav[8], "WAVEfmt ", 8);
+    uint32_t fmtSize = 16;
+    memcpy(&wav[16], &fmtSize, 4);
+    uint16_t audioFmt = 1;
+    memcpy(&wav[20], &audioFmt, 2);
+    memcpy(&wav[22], &channels, 2);
+    memcpy(&wav[24], &sampleRate32, 4);
+    memcpy(&wav[28], &byteRate, 4);
+    memcpy(&wav[32], &blockAlign, 2);
+    memcpy(&wav[34], &bitsPerSample, 2);
+    memcpy(&wav[36], "data", 4);
+    memcpy(&wav[40], &pcmSize, 4);
+    memcpy(&wav[44], pcmPtr, pcmSize);
+
+    return wav;
+}
+
+// FFmpeg in-memory transcoding: any audio format (WMA, HCA, etc.) -> WAV PCM 16-bit
+// Uses custom AVIO for reading from memory buffer
+struct MemReadBuffer {
+    const uint8_t* data;
+    size_t size;
+    size_t pos;
+};
+
+static int memReadPacket(void* opaque, uint8_t* buf, int buf_size) {
+    MemReadBuffer* mb = (MemReadBuffer*)opaque;
+    int64_t remaining = (int64_t)mb->size - (int64_t)mb->pos;
+    if (remaining <= 0) return AVERROR_EOF;
+    int toRead = (int)std::min((int64_t)buf_size, remaining);
+    memcpy(buf, mb->data + mb->pos, toRead);
+    mb->pos += toRead;
+    return toRead;
+}
+
+static int64_t memSeekPacket(void* opaque, int64_t offset, int whence) {
+    MemReadBuffer* mb = (MemReadBuffer*)opaque;
+    if (whence == AVSEEK_SIZE) return (int64_t)mb->size;
+    if (whence == SEEK_SET) mb->pos = (size_t)offset;
+    else if (whence == SEEK_CUR) mb->pos += (size_t)offset;
+    else if (whence == SEEK_END) mb->pos = mb->size + (size_t)offset;
+    if (mb->pos > mb->size) mb->pos = mb->size;
+    return (int64_t)mb->pos;
+}
+
+static std::vector<uint8_t> transcodeToWAV(const uint8_t* srcData, size_t srcSize) {
+    if (!srcData || srcSize == 0) return {};
+
+    MemReadBuffer memBuf = { srcData, srcSize, 0 };
+
+    AVFormatContext* fmtCtx = avformat_alloc_context();
+    if (!fmtCtx) return {};
+
+    const int avioBufSize = 8192;
+    uint8_t* avioBuf = (uint8_t*)av_malloc(avioBufSize);
+    AVIOContext* avioCtx = avio_alloc_context(avioBuf, avioBufSize, 0, &memBuf,
+                                              memReadPacket, nullptr, memSeekPacket);
+    fmtCtx->pb = avioCtx;
+
+    if (avformat_open_input(&fmtCtx, nullptr, nullptr, nullptr) < 0) {
+        av_freep(&avioCtx->buffer);
+        avio_context_free(&avioCtx);
+        return {};
+    }
+
+    if (avformat_find_stream_info(fmtCtx, nullptr) < 0) {
+        avformat_close_input(&fmtCtx);
+        av_freep(&avioCtx->buffer);
+        avio_context_free(&avioCtx);
+        return {};
+    }
+
+    // Find audio stream
+    int audioIdx = -1;
+    for (unsigned i = 0; i < fmtCtx->nb_streams; i++) {
+        if (fmtCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            audioIdx = (int)i;
+            break;
+        }
+    }
+    if (audioIdx < 0) {
+        avformat_close_input(&fmtCtx);
+        av_freep(&avioCtx->buffer);
+        avio_context_free(&avioCtx);
+        return {};
+    }
+
+    AVCodecParameters* codecPar = fmtCtx->streams[audioIdx]->codecpar;
+    const AVCodec* codec = avcodec_find_decoder(codecPar->codec_id);
+    if (!codec) {
+        avformat_close_input(&fmtCtx);
+        av_freep(&avioCtx->buffer);
+        avio_context_free(&avioCtx);
+        return {};
+    }
+
+    AVCodecContext* codecCtx = avcodec_alloc_context3(codec);
+    avcodec_parameters_to_context(codecCtx, codecPar);
+    if (avcodec_open2(codecCtx, codec, nullptr) < 0) {
+        avcodec_free_context(&codecCtx);
+        avformat_close_input(&fmtCtx);
+        av_freep(&avioCtx->buffer);
+        avio_context_free(&avioCtx);
+        return {};
+    }
+
+    // Setup resampler: output = 16-bit PCM stereo 44100Hz
+    SwrContext* swr = nullptr;
+    AVChannelLayout outLayout = AV_CHANNEL_LAYOUT_STEREO;
+    AVChannelLayout inLayout;
+    av_channel_layout_copy(&inLayout, &codecCtx->ch_layout);
+
+    swr_alloc_set_opts2(&swr, &outLayout, AV_SAMPLE_FMT_S16, 44100,
+                        &inLayout, codecCtx->sample_fmt, codecCtx->sample_rate, 0, nullptr);
+    if (!swr || swr_init(swr) < 0) {
+        if (swr) swr_free(&swr);
+        av_channel_layout_uninit(&inLayout);
+        avcodec_free_context(&codecCtx);
+        avformat_close_input(&fmtCtx);
+        av_freep(&avioCtx->buffer);
+        avio_context_free(&avioCtx);
+        return {};
+    }
+
+    // Decode all frames
+    std::vector<uint8_t> pcmData;
+    AVPacket* pkt = av_packet_alloc();
+    AVFrame* frame = av_frame_alloc();
+
+    while (av_read_frame(fmtCtx, pkt) >= 0) {
+        if (pkt->stream_index == audioIdx) {
+            if (avcodec_send_packet(codecCtx, pkt) >= 0) {
+                while (avcodec_receive_frame(codecCtx, frame) >= 0) {
+                    int outSamples = swr_get_out_samples(swr, frame->nb_samples);
+                    if (outSamples <= 0) continue;
+                    // 2 channels * 2 bytes per sample
+                    std::vector<uint8_t> outBuf(outSamples * 4);
+                    uint8_t* outPtr = outBuf.data();
+                    int converted = swr_convert(swr, &outPtr, outSamples,
+                                               (const uint8_t**)frame->data, frame->nb_samples);
+                    if (converted > 0) {
+                        pcmData.insert(pcmData.end(), outBuf.begin(), outBuf.begin() + converted * 4);
+                    }
+                }
+            }
+        }
+        av_packet_unref(pkt);
+    }
+
+    // Flush decoder
+    avcodec_send_packet(codecCtx, nullptr);
+    while (avcodec_receive_frame(codecCtx, frame) >= 0) {
+        int outSamples = swr_get_out_samples(swr, frame->nb_samples);
+        if (outSamples <= 0) continue;
+        std::vector<uint8_t> outBuf(outSamples * 4);
+        uint8_t* outPtr = outBuf.data();
+        int converted = swr_convert(swr, &outPtr, outSamples,
+                                   (const uint8_t**)frame->data, frame->nb_samples);
+        if (converted > 0) {
+            pcmData.insert(pcmData.end(), outBuf.begin(), outBuf.begin() + converted * 4);
+        }
+    }
+
+    av_frame_free(&frame);
+    av_packet_free(&pkt);
+    swr_free(&swr);
+    av_channel_layout_uninit(&inLayout);
+    avcodec_free_context(&codecCtx);
+    avformat_close_input(&fmtCtx);
+    // avioCtx->buffer was freed by avformat_close_input
+    avio_context_free(&avioCtx);
+
+    if (pcmData.empty()) return {};
+
+    // Build WAV: 44-byte header + PCM
+    uint32_t dataSize = (uint32_t)pcmData.size();
+    std::vector<uint8_t> wav(44 + dataSize, 0);
+    uint32_t riffSize = 36 + dataSize;
+    memcpy(&wav[0], "RIFF", 4);
+    memcpy(&wav[4], &riffSize, 4);
+    memcpy(&wav[8], "WAVEfmt ", 8);
+    uint32_t fmtSz = 16;
+    memcpy(&wav[16], &fmtSz, 4);
+    uint16_t audioFmtPcm = 1;
+    memcpy(&wav[20], &audioFmtPcm, 2);
+    uint16_t ch = 2;
+    memcpy(&wav[22], &ch, 2);
+    uint32_t sr = 44100;
+    memcpy(&wav[24], &sr, 4);
+    uint32_t br = 44100 * 4;
+    memcpy(&wav[28], &br, 4);
+    uint16_t ba = 4;
+    memcpy(&wav[32], &ba, 2);
+    uint16_t bps = 16;
+    memcpy(&wav[34], &bps, 2);
+    memcpy(&wav[36], "data", 4);
+    memcpy(&wav[40], &dataSize, 4);
+    memcpy(&wav[44], pcmData.data(), dataSize);
+
+    return wav;
+}
+
+// Transcode a file on disk to WAV (for S3V, etc.)
+static std::vector<uint8_t> transcodeFileToWAV(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return {};
+    std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
+                               std::istreambuf_iterator<char>());
+    f.close();
+    return transcodeToWAV(data.data(), data.size());
+}
+
+void Game::exportBeatmap() {
+    if (selectedSongIndex < 0 || selectedSongIndex >= (int)songList.size()) return;
+    if (songList[selectedSongIndex].difficulties.empty()) return;
+
+    // Reuse the Loading state for async export
+    if (loadingThread.joinable()) loadingThread.join();
+    loadingState = LoadingState::Idle;
+    loadingProgress = 0.0f;
+    loadingCancelled = false;
+    pendingExport = true;
+    stateBeforeLoading = state;
+    {
+        std::lock_guard<std::mutex> lock(loadingMutex);
+        loadingStatusText = "Preparing export...";
+    }
+    state = GameState::Loading;
+    loadingThread = std::thread(&Game::exportBeatmapAsync, this);
+}
+
+void Game::exportBeatmapAsync() {
+    #define CHECK_EXPORT_CANCELLED() if (loadingCancelled) { loadingState = LoadingState::Cancelled; return; }
+    #define SET_EXPORT_STATUS(text) { std::lock_guard<std::mutex> lock(loadingMutex); loadingStatusText = text; }
+
+    namespace fs = std::filesystem;
+    loadingState = LoadingState::Parsing;
+    loadingProgress = 0.0f;
+
+    const SongEntry& song = songList[selectedSongIndex];
+    if (song.difficulties.empty()) return;
+
+    // Select export destination
+    fs::path exportDir = fs::current_path() / "Exports";
+    fs::create_directories(exportDir);
+
+    // Build .osz filename
+    std::string artist = song.artist.empty() ? "Unknown" : song.artist;
+    std::string title = song.title.empty() ? "Unknown" : song.title;
+    std::string oszName = sanitizeFilename(artist + " - " + title) + ".osz";
+    fs::path oszPath = fs::path(exportDir) / oszName;
+
+    std::vector<ZipEntry> zipEntries;
+    std::set<std::string> addedNames;  // Prevent duplicate ZIP entries
+    // Track keysound files to include: relative name -> source path
+    std::map<std::string, std::string> keysoundFiles;
+    std::string audioRelName;  // Audio filename inside the .osz
+
+    // Determine source format
+    BeatmapSource srcFormat = song.source;
+
+    // For O2Jam: parse OJM once
+    OjmInfo ojmInfo;
+    bool ojmLoaded = false;
+
+    // For DJMAX Online: extract PAK audio once
+    // Map filename -> audio data (extracted from .pak)
+    std::map<std::string, std::vector<uint8_t>> pakAudioFiles;
+    bool pakExtracted = false;
+
+    for (size_t di = 0; di < song.difficulties.size(); di++) {
+        const DifficultyInfo& diff = song.difficulties[di];
+        if (diff.path.empty()) continue;
+
+        CHECK_EXPORT_CANCELLED();
+        float baseProgress = (float)di / (float)song.difficulties.size();
+        loadingProgress = baseProgress;
+        SET_EXPORT_STATUS("Parsing difficulty " + std::to_string(di + 1) + "/" + std::to_string(song.difficulties.size()) + "...");
+
+        BeatmapInfo info;
+
+        // Parse path - some formats use "path:extra:extra" (O2Jam, IIDX)
+        std::string actualPath = diff.path;
+        int subDiffIdx = -1;
+        {
+            size_t c1 = diff.path.rfind(':');
+            if (c1 != std::string::npos && c1 > 2) {
+                size_t c2 = diff.path.rfind(':', c1 - 1);
+                if (c2 != std::string::npos && c2 > 2) {
+                    // Format: path:diffIdx:level
+                    std::string diffStr = diff.path.substr(c2 + 1, c1 - c2 - 1);
+                    try { subDiffIdx = std::stoi(diffStr); } catch (...) {}
+                    actualPath = diff.path.substr(0, c2);
+                } else {
+                    // Format: path:diffIdx (IIDX)
+                    std::string diffStr = diff.path.substr(c1 + 1);
+                    try { subDiffIdx = std::stoi(diffStr); } catch (...) {}
+                    actualPath = diff.path.substr(0, c1);
+                }
+            }
+        }
+
+        fs::path diffPath(actualPath);
+        fs::path diffDir = diffPath.parent_path();
+        std::string ext = diffPath.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+        bool parseOk = false;
+
+        // Parse based on format
+        if (ext == ".osu") {
+            parseOk = OsuParser::parse(actualPath, info);
+        } else if (ext == ".bms" || ext == ".bme" || ext == ".bml" || ext == ".pms") {
+            // Parse full BMS data per difficulty (wavDefs may differ)
+            BMSData bmsData;
+            bool bmsOk = BMSParser::parseFull(actualPath, bmsData);
+            if (bmsOk) {
+                info = bmsData.beatmap;
+                parseOk = true;
+                // Map customIndex -> filename from wavDefs
+                for (auto& note : info.notes) {
+                    if (note.customIndex > 0 && note.filename.empty()) {
+                        auto it = bmsData.wavDefs.find(note.customIndex);
+                        if (it != bmsData.wavDefs.end())
+                            note.filename = it->second;
+                    }
+                }
+                for (auto& ss : info.storyboardSamples) {
+                    if (ss.filename.empty()) {
+                        int sid = ss.sampleHandle > 0 ? ss.sampleHandle : ss.customIndex;
+                        if (sid > 0) {
+                            auto it = bmsData.wavDefs.find(sid);
+                            if (it != bmsData.wavDefs.end())
+                                ss.filename = it->second;
+                        }
+                    }
+                }
+            }
+        } else if (ext == ".ojn") {
+            OjnDifficulty ojnDiff = OjnDifficulty::Hard;
+            if (subDiffIdx == 0) ojnDiff = OjnDifficulty::Easy;
+            else if (subDiffIdx == 1) ojnDiff = OjnDifficulty::Normal;
+            else if (subDiffIdx == 2) ojnDiff = OjnDifficulty::Hard;
+            parseOk = OjnParser::parse(actualPath, info, ojnDiff);
+            // Extract OJM samples
+            if (parseOk && !ojmLoaded) {
+                std::string ojmPath = OjmParser::getOjmPath(actualPath);
+                if (!ojmPath.empty())
+                    ojmLoaded = OjmParser::parse(ojmPath, ojmInfo);
+            }
+            // Map customIndex -> filename and add sample data to zip
+            if (parseOk && ojmLoaded) {
+                for (auto& note : info.notes) {
+                    if (note.customIndex > 0 && note.filename.empty()) {
+                        auto it = ojmInfo.samples.find(note.customIndex);
+                        if (it != ojmInfo.samples.end()) {
+                            std::string fn = std::to_string(note.customIndex) + (it->second.isOgg ? ".ogg" : ".wav");
+                            note.filename = fn;
+                            if (keysoundFiles.find(fn) == keysoundFiles.end()) {
+                                // Add directly as zip entry (data already in memory)
+                                ZipEntry ze;
+                                ze.name = fn;
+                                ze.data = it->second.data;
+                                ze.crc = calcCRC32(ze.data.data(), ze.data.size());
+                                zipEntries.push_back(std::move(ze));
+                                keysoundFiles[fn] = "<packed>";
+                                addedNames.insert(fn);
+                            }
+                        }
+                    }
+                }
+                for (auto& ss : info.storyboardSamples) {
+                    int sid = ss.customIndex >= 0 ? ss.customIndex : (ss.sampleHandle > 0 ? ss.sampleHandle : -1);
+                    if (sid > 0 && ss.filename.empty()) {
+                        auto it = ojmInfo.samples.find(sid);
+                        if (it != ojmInfo.samples.end()) {
+                            std::string fn = std::to_string(sid) + (it->second.isOgg ? ".ogg" : ".wav");
+                            ss.filename = fn;
+                            if (keysoundFiles.find(fn) == keysoundFiles.end()) {
+                                ZipEntry ze;
+                                ze.name = fn;
+                                ze.data = it->second.data;
+                                ze.crc = calcCRC32(ze.data.data(), ze.data.size());
+                                zipEntries.push_back(std::move(ze));
+                                keysoundFiles[fn] = "<packed>";
+                                addedNames.insert(fn);
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (ext == ".pt") {
+            parseOk = PTParser::parse(actualPath, info);
+            // Extract PAK keysounds once
+            if (parseOk && !pakExtracted) {
+                pakExtracted = true;
+                SET_EXPORT_STATUS("Extracting PAK audio...");
+                fs::path ptPath(actualPath);
+                std::string stemStr = ptPath.stem().string();
+                size_t underscorePos = stemStr.find('_');
+                std::string basePakName = (underscorePos != std::string::npos) ? stemStr.substr(0, underscorePos) : stemStr;
+                fs::path pakPath = ptPath.parent_path() / (basePakName + ".pak");
+                if (!fs::exists(pakPath)) {
+                    for (const auto& entry : fs::directory_iterator(ptPath.parent_path())) {
+                        if (entry.path().extension() == ".pak") {
+                            pakPath = entry.path();
+                            break;
+                        }
+                    }
+                }
+                if (fs::exists(pakPath)) {
+                    std::cout << "[PAK] Loading keys..." << std::endl;
+                    PakExtractor pakExtractor;
+                    bool keysOk = pakExtractor.loadKeys();
+                    std::cout << "[PAK] Keys loaded: " << keysOk << ", opening PAK..." << std::endl;
+                    if (keysOk && pakExtractor.open(pakPath.string())) {
+                        auto fileList = pakExtractor.getFileList();
+                        std::cout << "[PAK] File list: " << fileList.size() << " entries, extracting audio..." << std::endl;
+                        int extracted = 0;
+                        for (const auto& fileEntry : fileList) {
+                            if (loadingCancelled) break;
+                            std::string entryExt = fs::path(fileEntry.filename).extension().string();
+                            std::transform(entryExt.begin(), entryExt.end(), entryExt.begin(), ::tolower);
+                            if (entryExt == ".ogg" || entryExt == ".wav" || entryExt == ".mp3") {
+                                std::string fn = fs::path(fileEntry.filename).filename().string();
+                                std::string fnLower = fn;
+                                std::transform(fnLower.begin(), fnLower.end(), fnLower.begin(), ::tolower);
+                                std::vector<uint8_t> data;
+                                if (pakExtractor.extractFile(fileEntry.filename, data)) {
+                                    pakAudioFiles[fnLower] = std::move(data);
+                                    extracted++;
+                                }
+                            }
+                        }
+                        pakExtractor.close();
+                        std::cout << "[PAK] Extracted " << extracted << " audio files, total memory ~"
+                                  << [&]() { size_t total = 0; for (auto& p : pakAudioFiles) total += p.second.size(); return total / 1024; }()
+                                  << " KB" << std::endl;
+                    }
+                }
+            }
+            // Add PAK audio to ZIP for notes in this difficulty
+            if (parseOk && !pakAudioFiles.empty()) {
+                // Map: original note filename (.wav) -> actual ZIP filename (.ogg etc.)
+                std::map<std::string, std::string> pakRenameMap;
+                auto addPakAudio = [&](const std::string& filename) {
+                    if (filename.empty()) return;
+                    std::string fn = fs::path(filename).filename().string();
+                    if (keysoundFiles.find(fn) != keysoundFiles.end()) return;
+                    // Case-insensitive lookup with alternate extensions
+                    // (PTParser converts .ogg -> .wav, PAK stores originals, case may differ)
+                    std::string stem = fs::path(fn).stem().string();
+                    std::string stemLower = stem;
+                    std::transform(stemLower.begin(), stemLower.end(), stemLower.begin(), ::tolower);
+                    std::string matchedExt;
+                    std::string matchedKey;
+                    for (const char* tryExt : {".ogg", ".wav", ".mp3"}) {
+                        std::string tryKey = stemLower + tryExt;
+                        if (pakAudioFiles.count(tryKey)) { matchedKey = tryKey; matchedExt = tryExt; break; }
+                    }
+                    if (!matchedKey.empty()) {
+                        // Use the real extension from PAK so osu! can decode correctly
+                        std::string zipFn = stem + matchedExt;
+                        ZipEntry ze;
+                        ze.name = zipFn;
+                        ze.data = std::move(pakAudioFiles[matchedKey]);
+                        ze.crc = calcCRC32(ze.data.data(), ze.data.size());
+                        zipEntries.push_back(std::move(ze));
+                        keysoundFiles[fn] = "<packed>";
+                        addedNames.insert(zipFn);
+                        if (fn != zipFn) pakRenameMap[fn] = zipFn;
+                    }
+                };
+                for (const auto& note : info.notes) addPakAudio(note.filename);
+                for (const auto& ss : info.storyboardSamples) addPakAudio(ss.filename);
+                // Update note filenames to match actual ZIP names
+                for (auto& note : info.notes) {
+                    if (!note.filename.empty()) {
+                        std::string fn = fs::path(note.filename).filename().string();
+                        auto rit = pakRenameMap.find(fn);
+                        if (rit != pakRenameMap.end()) note.filename = rit->second;
+                    }
+                }
+                for (auto& ss : info.storyboardSamples) {
+                    if (!ss.filename.empty()) {
+                        std::string fn = fs::path(ss.filename).filename().string();
+                        auto rit = pakRenameMap.find(fn);
+                        if (rit != pakRenameMap.end()) ss.filename = rit->second;
+                    }
+                }
+            }
+        } else if (ext == ".bytes") {
+            parseOk = DJMaxParser::parse(actualPath, info);
+        } else if (ext == ".mc") {
+            parseOk = MalodyParser::parse(actualPath, info);
+        } else if (ext == ".ez") {
+            parseOk = EZ2ACParser::parse(actualPath, info);
+            // Convert SSF keysounds to WAV and add to ZIP
+            if (parseOk) {
+                auto addSSFKeysound = [&](const std::string& filename) {
+                    if (filename.empty()) return;
+                    std::string fn = filename;
+                    size_t sep = fn.find_last_of("/\\");
+                    if (sep != std::string::npos) fn = fn.substr(sep + 1);
+                    std::string stem = fs::path(fn).stem().string();
+                    std::string wavFn = stem + ".wav";
+                    if (keysoundFiles.find(wavFn) != keysoundFiles.end()) return;
+
+                    // Search for .ssf file in multiple directories
+                    fs::path ssfPath;
+                    std::vector<fs::path> searchDirs = { diffDir };
+                    if (!song.folderPath.empty()) searchDirs.push_back(fs::path(song.folderPath));
+                    if (diffDir.has_parent_path()) searchDirs.push_back(diffDir.parent_path());
+                    for (const auto& dir : searchDirs) {
+                        fs::path tryPath = dir / (stem + ".ssf");
+                        if (fs::exists(tryPath)) { ssfPath = tryPath; break; }
+                    }
+                    if (ssfPath.empty()) return;
+
+                    std::ifstream ssfFile(ssfPath, std::ios::binary);
+                    if (!ssfFile) return;
+                    std::vector<uint8_t> ssfData((std::istreambuf_iterator<char>(ssfFile)),
+                                                  std::istreambuf_iterator<char>());
+                    ssfFile.close();
+                    std::vector<uint8_t> wavData = convertSSFtoWAV(ssfData);
+                    if (wavData.empty()) return;
+
+                    ZipEntry ze;
+                    ze.name = wavFn;
+                    ze.data = std::move(wavData);
+                    ze.crc = calcCRC32(ze.data.data(), ze.data.size());
+                    zipEntries.push_back(std::move(ze));
+                    keysoundFiles[wavFn] = "<packed>";
+                    addedNames.insert(wavFn);
+                };
+                for (auto& note : info.notes) {
+                    addSSFKeysound(note.filename);
+                    // Ensure note references .wav filename for .osu output
+                    if (!note.filename.empty()) {
+                        std::string stem = fs::path(note.filename).stem().string();
+                        note.filename = stem + ".wav";
+                    }
+                }
+                for (auto& ss : info.storyboardSamples) {
+                    addSSFKeysound(ss.filename);
+                    if (!ss.filename.empty()) {
+                        std::string stem = fs::path(ss.filename).stem().string();
+                        ss.filename = stem + ".wav";
+                    }
+                }
+            }
+        } else if (ext == ".1") {
+            // IIDX: parse chart with difficulty index
+            int iidxDiff = (subDiffIdx >= 0) ? subDiffIdx : IIDXParser::SP_ANOTHER;
+            parseOk = IIDXParser::parse(actualPath, info, iidxDiff);
+            // Extract S3P/2DX keysounds and transcode WMA -> WAV
+            if (parseOk) {
+                SET_EXPORT_STATUS("Transcoding IIDX keysounds (" + std::to_string(di + 1) + "/" + std::to_string(song.difficulties.size()) + ")...");
+                fs::path chartPath(actualPath);
+                std::string songId = chartPath.stem().string();
+                fs::path s3pPath = chartPath.parent_path() / (songId + ".s3p");
+                fs::path twoDxPath = chartPath.parent_path() / (songId + ".2dx");
+
+                std::string archivePath;
+                if (fs::exists(s3pPath)) archivePath = s3pPath.string();
+                else if (fs::exists(twoDxPath)) archivePath = twoDxPath.string();
+
+                if (!archivePath.empty()) {
+                    // S3P and 2DX share the same S3V0 sample format
+                    std::vector<S3PParser::Sample> samples;
+                    bool parsed = false;
+                    if (fs::path(archivePath).extension() == ".s3p")
+                        parsed = S3PParser::parse(archivePath, samples);
+                    else {
+                        std::vector<TwoDxParser::Sample> tdxSamples;
+                        if (TwoDxParser::parse(archivePath, tdxSamples)) {
+                            parsed = true;
+                            for (auto& s : tdxSamples) {
+                                S3PParser::Sample ss;
+                                ss.offset = s.offset;
+                                ss.size = s.headerSize + s.waveSize;
+                                ss.waveOffset = s.waveOffset;
+                                ss.waveSize = s.waveSize;
+                                samples.push_back(ss);
+                            }
+                        }
+                    }
+                    if (parsed) {
+                        std::ifstream archiveFile(archivePath, std::ios::binary);
+                        int transcoded = 0;
+                        for (size_t si = 0; si < samples.size(); si++) {
+                            CHECK_EXPORT_CANCELLED();
+                            const auto& sample = samples[si];
+                            if (sample.waveSize <= 0) continue;
+                            int sampleIdx = (int)si + 1;  // 1-based
+                            std::string wavFn = std::to_string(sampleIdx) + ".wav";
+                            if (keysoundFiles.find(wavFn) != keysoundFiles.end()) continue;
+
+                            std::vector<uint8_t> waveData(sample.waveSize);
+                            archiveFile.seekg(sample.waveOffset, std::ios::beg);
+                            archiveFile.read(reinterpret_cast<char*>(waveData.data()), sample.waveSize);
+
+                            std::vector<uint8_t> wavOut = transcodeToWAV(waveData.data(), waveData.size());
+                            if (!wavOut.empty()) {
+                                ZipEntry ze;
+                                ze.name = wavFn;
+                                ze.data = std::move(wavOut);
+                                ze.crc = calcCRC32(ze.data.data(), ze.data.size());
+                                zipEntries.push_back(std::move(ze));
+                                keysoundFiles[wavFn] = "<packed>";
+                                addedNames.insert(wavFn);
+                                transcoded++;
+                            }
+                        }
+                        std::cout << "Export: transcoded " << transcoded << " IIDX keysounds" << std::endl;
+                    }
+                }
+                // Assign filenames to notes based on customIndex
+                for (auto& note : info.notes) {
+                    if (note.customIndex > 0 && note.filename.empty()) {
+                        note.filename = std::to_string(note.customIndex) + ".wav";
+                    }
+                }
+                for (auto& ss : info.storyboardSamples) {
+                    int sid = ss.customIndex >= 0 ? ss.customIndex : -1;
+                    if (sid > 0 && ss.filename.empty()) {
+                        ss.filename = std::to_string(sid) + ".wav";
+                    }
+                }
+            }
+        } else if (ext == ".vox") {
+            // SDVX: parse chart, transcode S3V audio to WAV
+            parseOk = VoxParser::parse(actualPath, info);
+            if (parseOk && !info.audioFilename.empty()) {
+                fs::path voxDir = fs::path(actualPath).parent_path();
+                fs::path s3vPath = voxDir / info.audioFilename;
+                if (fs::exists(s3vPath)) {
+                    SET_EXPORT_STATUS("Transcoding SDVX audio...");
+                    std::vector<uint8_t> wavOut = transcodeFileToWAV(s3vPath.string());
+                    if (!wavOut.empty()) {
+                        std::string wavFn = fs::path(info.audioFilename).stem().string() + ".wav";
+                        info.audioFilename = wavFn;
+                        if (!addedNames.count(wavFn)) {
+                            ZipEntry ze;
+                            ze.name = wavFn;
+                            ze.data = std::move(wavOut);
+                            ze.crc = calcCRC32(ze.data.data(), ze.data.size());
+                            zipEntries.push_back(std::move(ze));
+                            addedNames.insert(wavFn);
+                        }
+                        audioRelName = wavFn;
+                    }
+                }
+            }
+        } else if (ext == ".txt" && (actualPath.find("4T") != std::string::npos || actualPath.find("6T") != std::string::npos || actualPath.find("2T") != std::string::npos)) {
+            // MUSYNX chart
+            parseOk = MuSynxParser::parse(actualPath, info);
+            if (parseOk) {
+                // Extract song name from filename (e.g., "silverTown4T_easy.txt" -> "silverTown")
+                std::string chartName = fs::path(actualPath).stem().string();
+                size_t keyPos = chartName.find("2T");
+                if (keyPos == std::string::npos) keyPos = chartName.find("4T");
+                if (keyPos == std::string::npos) keyPos = chartName.find("6T");
+                std::string muSongName = (keyPos != std::string::npos) ? chartName.substr(0, keyPos) : chartName;
+
+                // Find ACB file
+                std::string acbName = "song_" + muSongName + ".acb";
+                fs::path acbPath = diffDir / acbName;
+                if (!fs::exists(acbPath) && diffDir.has_parent_path()) {
+                    acbPath = diffDir.parent_path() / acbName;
+                }
+
+                if (fs::exists(acbPath)) {
+                    SET_EXPORT_STATUS("Extracting MUSYNX audio...");
+                    std::string tempDir = "Data/Tmp/musynx_" + muSongName;
+
+                    // Extract ACB if not cached
+                    std::string bgmWav = tempDir + "/bgm.wav";
+                    if (!fs::exists(bgmWav)) {
+                        auto cueToAwb = AcbParser::parseCueToAwbMapping(acbPath.string());
+                        if (!cueToAwb.empty()) {
+                            AcbParser::extractAndConvertMapped(acbPath.string(), tempDir, cueToAwb);
+                        } else {
+                            auto acbCues = AcbParser::extractCueNames(acbPath.string());
+                            std::vector<std::string> cueNames;
+                            for (const auto& cue : acbCues) cueNames.push_back(cue.name);
+                            AcbParser::extractAndConvert(acbPath.string(), tempDir, cueNames);
+                        }
+                    }
+
+                    // Add BGM WAV to ZIP
+                    if (fs::exists(bgmWav)) {
+                        std::ifstream bgmFile(bgmWav, std::ios::binary);
+                        std::vector<uint8_t> bgmData((std::istreambuf_iterator<char>(bgmFile)),
+                                                      std::istreambuf_iterator<char>());
+                        bgmFile.close();
+                        if (!bgmData.empty() && !addedNames.count("bgm.wav")) {
+                            ZipEntry ze;
+                            ze.name = "bgm.wav";
+                            ze.data = std::move(bgmData);
+                            ze.crc = calcCRC32(ze.data.data(), ze.data.size());
+                            zipEntries.push_back(std::move(ze));
+                            addedNames.insert("bgm.wav");
+                        }
+                        info.audioFilename = "bgm.wav";
+                        audioRelName = "bgm.wav";
+                    }
+
+                    // Add keysound WAVs to ZIP and update note filenames
+                    for (auto& note : info.notes) {
+                        if (note.filename.empty()) continue;
+                        std::string wavFn = note.filename + ".wav";
+                        note.filename = wavFn;
+                        if (keysoundFiles.find(wavFn) != keysoundFiles.end()) continue;
+
+                        fs::path wavPath = fs::path(tempDir) / wavFn;
+                        if (fs::exists(wavPath)) {
+                            std::ifstream wf(wavPath, std::ios::binary);
+                            std::vector<uint8_t> wData((std::istreambuf_iterator<char>(wf)),
+                                                        std::istreambuf_iterator<char>());
+                            wf.close();
+                            if (!wData.empty()) {
+                                ZipEntry ze;
+                                ze.name = wavFn;
+                                ze.data = std::move(wData);
+                                ze.crc = calcCRC32(ze.data.data(), ze.data.size());
+                                zipEntries.push_back(std::move(ze));
+                                keysoundFiles[wavFn] = "<packed>";
+                                addedNames.insert(wavFn);
+                            }
+                        }
+                    }
+                    std::cout << "Export: packed " << keysoundFiles.size() << " MUSYNX keysounds" << std::endl;
+                }
+            }
+        } else if (ext == ".sm" || ext == ".ssc") {
+            parseOk = StepManiaParser::parse(actualPath, info);
+        } else {
+            parseOk = OsuParser::parse(actualPath, info);
+        }
+
+        if (!parseOk) {
+            std::cerr << "Export: failed to parse " << diff.path << std::endl;
+            continue;
+        }
+
+        // Force consistent metadata across all difficulties so osu! groups them
+        info.title = title;
+        info.artist = artist;
+        if (info.titleUnicode.empty()) info.titleUnicode = song.titleUnicode;
+        if (info.artistUnicode.empty()) info.artistUnicode = song.artistUnicode;
+
+        // Determine audio filename for .osu
+        std::string audioFn = info.audioFilename;
+        if (!audioFn.empty()) {
+            size_t sep = audioFn.find_last_of("/\\");
+            if (sep != std::string::npos) audioFn = audioFn.substr(sep + 1);
+        }
+        if (audioFn.empty()) audioFn = "audio.mp3";
+        if (audioRelName.empty()) audioRelName = audioFn;
+
+        // Collect keysound files from notes
+        for (const auto& note : info.notes) {
+            if (note.filename.empty()) continue;
+            std::string fn = note.filename;
+            size_t sep = fn.find_last_of("/\\");
+            if (sep != std::string::npos) fn = fn.substr(sep + 1);
+            if (keysoundFiles.find(fn) != keysoundFiles.end()) continue;
+
+            // Try to find the file on disk (multiple search paths)
+            std::string srcPath;
+            std::vector<fs::path> searchDirs = { diffDir };
+            if (!song.folderPath.empty()) searchDirs.push_back(fs::path(song.folderPath));
+            // Also try parent directory (some formats store audio one level up)
+            if (diffDir.has_parent_path()) searchDirs.push_back(diffDir.parent_path());
+
+            for (const auto& dir : searchDirs) {
+                if (!srcPath.empty()) break;
+                fs::path tryPath = dir / note.filename;
+                if (fs::exists(tryPath)) { srcPath = tryPath.string(); break; }
+                tryPath = dir / fn;
+                if (fs::exists(tryPath)) { srcPath = tryPath.string(); break; }
+                // Try common extensions
+                std::string stem = fs::path(fn).stem().string();
+                for (const char* tryExt : {".wav", ".ogg", ".mp3"}) {
+                    tryPath = dir / (stem + tryExt);
+                    if (fs::exists(tryPath)) { srcPath = tryPath.string(); fn = stem + tryExt; break; }
+                }
+            }
+            keysoundFiles[fn] = srcPath;
+        }
+
+        // Collect keysound files from storyboard samples
+        for (const auto& ss : info.storyboardSamples) {
+            if (ss.filename.empty()) continue;
+            std::string fn = ss.filename;
+            size_t sep = fn.find_last_of("/\\");
+            if (sep != std::string::npos) fn = fn.substr(sep + 1);
+            if (keysoundFiles.find(fn) != keysoundFiles.end()) continue;
+
+            std::string srcPath;
+            std::vector<fs::path> searchDirs = { diffDir };
+            if (!song.folderPath.empty()) searchDirs.push_back(fs::path(song.folderPath));
+            if (diffDir.has_parent_path()) searchDirs.push_back(diffDir.parent_path());
+
+            for (const auto& dir : searchDirs) {
+                if (!srcPath.empty()) break;
+                fs::path tryPath = dir / ss.filename;
+                if (fs::exists(tryPath)) { srcPath = tryPath.string(); break; }
+                tryPath = dir / fn;
+                if (fs::exists(tryPath)) { srcPath = tryPath.string(); break; }
+                std::string stem = fs::path(fn).stem().string();
+                for (const char* tryExt : {".wav", ".ogg", ".mp3"}) {
+                    tryPath = dir / (stem + tryExt);
+                    if (fs::exists(tryPath)) { srcPath = tryPath.string(); fn = stem + tryExt; break; }
+                }
+            }
+            keysoundFiles[fn] = srcPath;
+        }
+
+        // Generate .osu content
+        std::string osuContent = generateOsuFile(info, audioRelName);
+        std::string diffName = info.version;
+        // Always include key count to distinguish 5K/7K variants
+        std::string osuFilename = sanitizeFilename(artist + " - " + title
+            + " (" + info.creator + ") [" + diffName + " " + std::to_string(info.keyCount) + "K]") + ".osu";
+
+        // Deduplicate if still colliding
+        if (addedNames.count(osuFilename)) {
+            osuFilename = sanitizeFilename(artist + " - " + title
+                + " (" + info.creator + ") [" + diffName + " " + std::to_string(info.keyCount) + "K " + std::to_string(di) + "]") + ".osu";
+        }
+
+        ZipEntry osuEntry;
+        osuEntry.name = osuFilename;
+        osuEntry.data.assign(osuContent.begin(), osuContent.end());
+        osuEntry.crc = calcCRC32(osuEntry.data.data(), osuEntry.data.size());
+        zipEntries.push_back(std::move(osuEntry));
+        addedNames.insert(osuFilename);
+
+        std::cout << "Export: " << osuFilename << " (" << info.notes.size() << " notes)" << std::endl;
+        std::cout << "  diffDir: " << diffDir.string() << std::endl;
+        int ksFound = 0, ksMissing = 0;
+        for (const auto& [k, v] : keysoundFiles) {
+            if (v.empty()) ksMissing++; else ksFound++;
+        }
+        std::cout << "  keysounds: " << ksFound << " found, " << ksMissing << " missing" << std::endl;
+        if (ksMissing > 0 && !keysoundFiles.empty()) {
+            // Print first missing file for debugging
+            for (const auto& [k, v] : keysoundFiles) {
+                if (v.empty()) { std::cout << "  first missing: " << k << std::endl; break; }
+            }
+        }
+    }
+
+    if (zipEntries.empty()) {
+        std::cerr << "Export: no difficulties exported" << std::endl;
+        SET_EXPORT_STATUS("Export failed: no difficulties");
+        loadingState = LoadingState::Failed;
+        return;
+    }
+
+    CHECK_EXPORT_CANCELLED();
+    SET_EXPORT_STATUS("Collecting audio files...");
+    loadingProgress = 0.85f;
+
+    // Add audio file
+    if (!audioRelName.empty() && !addedNames.count(audioRelName)) {
+        std::string audioSrc;
+        if (!song.audioPath.empty() && fs::exists(song.audioPath)) {
+            audioSrc = song.audioPath;
+        } else if (!song.difficulties.empty()) {
+            // Try to find audio relative to first difficulty
+            fs::path diffDir = fs::path(song.difficulties[0].path).parent_path();
+            fs::path tryPath = diffDir / audioRelName;
+            if (fs::exists(tryPath)) audioSrc = tryPath.string();
+        }
+        if (!audioSrc.empty()) {
+            std::ifstream af(audioSrc, std::ios::binary);
+            if (af) {
+                std::vector<uint8_t> audioData((std::istreambuf_iterator<char>(af)),
+                                                std::istreambuf_iterator<char>());
+                ZipEntry ae;
+                ae.name = audioRelName;
+                ae.data = std::move(audioData);
+                ae.crc = calcCRC32(ae.data.data(), ae.data.size());
+                zipEntries.push_back(std::move(ae));
+                addedNames.insert(audioRelName);
+            }
+        }
+    }
+
+    // Generate silent audio for keysound-only maps (osu! requires an audio file)
+    if (!audioRelName.empty() && !addedNames.count(audioRelName)) {
+        // 0.1s silence, 44100Hz stereo 16-bit PCM WAV
+        const uint32_t sampleRate = 44100;
+        const uint32_t numSamples = sampleRate / 10;  // 0.1 seconds
+        const uint32_t dataSize = numSamples * 2 * 2;  // stereo 16-bit
+        const uint32_t fileSize = 36 + dataSize;
+        std::vector<uint8_t> wav(44 + dataSize, 0);
+        memcpy(&wav[0], "RIFF", 4);
+        memcpy(&wav[4], &fileSize, 4);
+        memcpy(&wav[8], "WAVE", 4);
+        memcpy(&wav[12], "fmt ", 4);
+        uint32_t fmtSize = 16; memcpy(&wav[16], &fmtSize, 4);
+        uint16_t audioFmt = 1; memcpy(&wav[20], &audioFmt, 2);
+        uint16_t channels = 2; memcpy(&wav[22], &channels, 2);
+        memcpy(&wav[24], &sampleRate, 4);
+        uint32_t byteRate = sampleRate * 4; memcpy(&wav[28], &byteRate, 4);
+        uint16_t blockAlign = 4; memcpy(&wav[32], &blockAlign, 2);
+        uint16_t bitsPerSample = 16; memcpy(&wav[34], &bitsPerSample, 2);
+        memcpy(&wav[36], "data", 4);
+        memcpy(&wav[40], &dataSize, 4);
+        // PCM data is already zeroed (silence)
+
+        ZipEntry ae;
+        ae.name = audioRelName;  // Keep original name so .osu references match
+        ae.data = std::move(wav);
+        ae.crc = calcCRC32(ae.data.data(), ae.data.size());
+        zipEntries.push_back(std::move(ae));
+        addedNames.insert(audioRelName);
+        std::cout << "Export: generated silent audio (keysound-only map)" << std::endl;
+    }
+
+    // Add keysound files (skip those already added as zip entries, e.g. O2Jam)
+    for (const auto& [fn, srcPath] : keysoundFiles) {
+        if (srcPath.empty()) continue;  // Already added or not found
+        if (addedNames.count(fn)) continue;  // Already in ZIP
+        std::ifstream kf(srcPath, std::ios::binary);
+        if (!kf) continue;
+        std::vector<uint8_t> data((std::istreambuf_iterator<char>(kf)),
+                                   std::istreambuf_iterator<char>());
+        ZipEntry ke;
+        ke.name = fn;
+        ke.data = std::move(data);
+        ke.crc = calcCRC32(ke.data.data(), ke.data.size());
+        zipEntries.push_back(std::move(ke));
+        addedNames.insert(fn);
+    }
+
+    CHECK_EXPORT_CANCELLED();
+    SET_EXPORT_STATUS("Writing .osz file...");
+    loadingProgress = 0.95f;
+
+    // Write .osz file
+    if (writeZipStore(oszPath.string(), zipEntries)) {
+        std::cout << "Exported: " << oszPath.string()
+                  << " (" << zipEntries.size() << " files)" << std::endl;
+        SET_EXPORT_STATUS("Export complete: " + oszName);
+    } else {
+        std::cerr << "Export failed: could not write " << oszPath.string() << std::endl;
+        SET_EXPORT_STATUS("Export failed: write error");
+    }
+
+    loadingProgress = 1.0f;
+    loadingState = LoadingState::Completed;
+
+    #undef CHECK_EXPORT_CANCELLED
+    #undef SET_EXPORT_STATUS
+}
+
 void Game::saveConfig() {
     std::ofstream file("config.ini");
     if (!file.is_open()) return;
 
     file << "[Sound]\n";
     file << "volume=" << settings.volume << "\n";
+    file << "keysoundVolume=" << settings.keysoundVolume << "\n";
     file << "audioDevice=" << settings.audioDevice << "\n";
     file << "audioOffset=" << settings.audioOffset << "\n";
     file << "audioOutputMode=" << settings.audioOutputMode << "\n";
@@ -370,13 +1640,19 @@ void Game::saveConfig() {
     file << "vsync=" << (settings.vsync ? 1 : 0) << "\n";
     file << "borderlessFullscreen=" << (settings.borderlessFullscreen ? 1 : 0) << "\n";
     file << "laneLight=" << (settings.laneLight ? 1 : 0) << "\n";
+    file << "quality=" << settings.quality << "\n";
+    file << "lowSpecMode=" << (settings.lowSpecMode ? 1 : 0) << "\n";
 
     file << "\n[Input]\n";
     file << "selectedKeyCount=" << settings.selectedKeyCount << "\n";
     file << "n1Style=" << (settings.n1Style ? 1 : 0) << "\n";
     file << "mirror=" << (settings.mirror ? 1 : 0) << "\n";
+    // Save lane colors for each key count
+    for (int i = 0; i < Settings::MAX_KEYS; i++) {
+        file << "laneColor" << i << "=" << (int)settings.laneColors[i] << "\n";
+    }
     // Save keys for each key count
-    for (int k = 0; k < 10; k++) {
+    for (int k = 0; k < Settings::MAX_KEYS; k++) {
         file << "keys" << (k + 1) << "=";
         for (int i = 0; i <= k; i++) {
             if (i > 0) file << ",";
@@ -451,6 +1727,7 @@ void Game::loadConfig() {
         try {
             if (section == "Sound") {
                 if (key == "volume") settings.volume = std::stoi(value);
+                else if (key == "keysoundVolume") settings.keysoundVolume = std::stoi(value);
                 else if (key == "audioDevice") settings.audioDevice = std::stoi(value);
                 else if (key == "audioOffset") settings.audioOffset = std::stoi(value);
                 else if (key == "audioOutputMode") settings.audioOutputMode = std::stoi(value);
@@ -458,19 +1735,28 @@ void Game::loadConfig() {
                 else if (key == "asioDevice") settings.asioDevice = std::stoi(value);
             }
             else if (section == "Graphics") {
-                if (key == "resolution") settings.resolution = std::stoi(value);
-                else if (key == "refreshRate") settings.refreshRate = std::stoi(value);
+                if (key == "resolution") settings.resolution = std::max(0, std::min(2, std::stoi(value)));
+                else if (key == "refreshRate") settings.refreshRate = std::max(0, std::min(4, std::stoi(value)));
                 else if (key == "vsync") settings.vsync = (value == "1");
                 else if (key == "borderlessFullscreen") settings.borderlessFullscreen = (value == "1");
                 else if (key == "laneLight") settings.laneLight = (value == "1");
+                else if (key == "quality") settings.quality = std::max(0, std::min(2, std::stoi(value)));
+                else if (key == "lowSpecMode") settings.lowSpecMode = (value == "1");
             }
             else if (section == "Input") {
                 if (key == "selectedKeyCount") settings.selectedKeyCount = std::stoi(value);
                 else if (key == "n1Style") settings.n1Style = (value == "1");
                 else if (key == "mirror") settings.mirror = (value == "1");
+                else if (key.find("laneColor") == 0 && key.size() > 9) {
+                    int i = std::stoi(key.substr(9));
+                    if (i >= 0 && i < Settings::MAX_KEYS) {
+                        int v = std::stoi(value);
+                        if (v >= 0 && v <= 3) settings.laneColors[i] = (NoteColor)v;
+                    }
+                }
                 else if (key.find("keys") == 0 && key.size() > 4) {
                     int k = std::stoi(key.substr(4)) - 1;
-                    if (k >= 0 && k < 10) {
+                    if (k >= 0 && k < Settings::MAX_KEYS) {
                         std::stringstream ss(value);
                         std::string token;
                         int i = 0;
@@ -533,7 +1819,7 @@ void Game::resetGame() {
     // when skipParsing=false, not here, to preserve async-loaded data
     for (int i = 0; i < 6; i++) judgementCounts[i] = 0;
     // Reset lane key states to prevent ghost key presses at game start
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 18; i++) {
         laneKeyDown[i] = false;
     }
     combo = 0;
@@ -585,7 +1871,7 @@ void Game::resetGame() {
     holdColorChangeTime = 0;
     ppCalculator.reset();
     // Initialize next note index for each lane
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 18; i++) {
         laneNextNoteIndex[i] = -1;  // Will be set after loading beatmap
     }
 }
@@ -644,8 +1930,10 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
     bool isIIDX = actualPath.size() > 2 && actualPath.substr(actualPath.size() - 2) == ".1";
     bool isMalody = actualPath.size() > 3 && actualPath.substr(actualPath.size() - 3) == ".mc";
     bool isMuSynx = actualPath.size() > 4 && actualPath.substr(actualPath.size() - 4) == ".txt" &&
-                   (actualPath.find("4T_") != std::string::npos || actualPath.find("6T_") != std::string::npos);
+                   (actualPath.find("2T_") != std::string::npos || actualPath.find("4T_") != std::string::npos || actualPath.find("6T_") != std::string::npos);
     bool isStepMania = StepManiaParser::isStepManiaFile(actualPath);
+    bool isVox = actualPath.size() > 4 && actualPath.substr(actualPath.size() - 4) == ".vox";
+    bool isEZ2AC = EZ2ACParser::isEZ2ACFile(actualPath);
     std::string ptAudioDir;  // For PT files with PAK extraction
 
     if (!skipParsing) {
@@ -684,7 +1972,7 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
             static bool keysLoaded = false;
 
             if (!keysLoaded) {
-                keysLoaded = pakExtractor.loadKeys("D:\\work\\DJMax_Online\\Xip-Pak-Extractor-main\\keyFiles");
+                keysLoaded = pakExtractor.loadKeys();
             }
 
             if (keysLoaded && pakExtractor.open(pakPath.string())) {
@@ -761,90 +2049,6 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
             return false;
         }
         std::cout << "Loaded O2Jam chart: " << beatmap.keyCount << "K" << std::endl;
-
-        // Load OJM file for key sounds
-        std::string ojmPath = OjmParser::getOjmPath(actualPath);
-        if (!ojmPath.empty()) {
-            OjmInfo ojmInfo;
-            if (OjmParser::parse(ojmPath, ojmInfo)) {
-                std::cout << "Loaded OJM: " << ojmInfo.samples.size() << " samples" << std::endl;
-
-                // Save samples to temp files and load into AudioManager
-                fs::path tempDir = fs::current_path() / "Data" / "Tmp" / "ojm";
-                fs::create_directories(tempDir);
-
-                std::unordered_map<int, int> sampleIdToHandle;
-                for (auto& [id, sample] : ojmInfo.samples) {
-                    std::string ext = sample.isOgg ? ".ogg" : ".wav";
-                    fs::path tempFile = tempDir / (std::to_string(id) + ext);
-
-                    std::ofstream out(tempFile, std::ios::binary);
-                    if (out) {
-                        out.write(reinterpret_cast<const char*>(sample.data.data()), sample.data.size());
-                        out.close();
-
-                        int handle = audio.loadSample(tempFile.string());
-                        if (handle >= 0) {
-                            sampleIdToHandle[id] = handle;
-                        }
-                    }
-                }
-
-                // Debug: print OJM sample IDs
-                std::cout << "OJM sample IDs: ";
-                for (auto& [id, handle] : sampleIdToHandle) {
-                    std::cout << id << " ";
-                }
-                std::cout << std::endl;
-
-                // Debug: print storyboard sample IDs before mapping
-                std::cout << "BGM sample IDs needed: ";
-                for (auto& sample : beatmap.storyboardSamples) {
-                    if (sample.sampleHandle > 0) {
-                        std::cout << sample.sampleHandle << " ";
-                    }
-                }
-                std::cout << std::endl;
-
-                // Update notes with sample handles
-                for (auto& note : beatmap.notes) {
-                    if (note.customIndex > 0) {
-                        auto it = sampleIdToHandle.find(note.customIndex);
-                        if (it != sampleIdToHandle.end()) {
-                            note.sampleHandle = it->second;
-                        }
-                    }
-                }
-
-                // Update storyboard samples (BGM) with sample handles
-                for (auto& sample : beatmap.storyboardSamples) {
-                    // sampleHandle contains the OJM sample ID (keysound: 2+, BGM: 1002+)
-                    // fallbackHandle contains the fallback ID
-                    if (sample.sampleHandle > 0) {
-                        int primaryId = sample.sampleHandle;
-                        int fallbackId = sample.fallbackHandle;
-
-                        auto it = sampleIdToHandle.find(primaryId);
-                        if (it != sampleIdToHandle.end()) {
-                            sample.sampleHandle = it->second;
-                        } else if (fallbackId > 0) {
-                            // Try fallback ID
-                            it = sampleIdToHandle.find(fallbackId);
-                            if (it != sampleIdToHandle.end()) {
-                                sample.sampleHandle = it->second;
-                            } else {
-                                sample.sampleHandle = -1;  // Not found
-                            }
-                        } else {
-                            sample.sampleHandle = -1;  // Not found
-                        }
-                        sample.fallbackHandle = -1;  // Clear the fallback field
-                    }
-                }
-
-                std::cout << "Loaded " << sampleIdToHandle.size() << " OJM samples" << std::endl;
-            }
-        }
     } else if (isBMS) {
         BMSData bmsData;
         if (!BMSParser::parseFull(actualPath, bmsData)) {
@@ -862,67 +2066,6 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
             }
             std::cout << "Applied 8K mirror (scratch on right)" << std::endl;
         }
-
-        // Load WAV files for key sounds
-        fs::path bmsDir = fs::path(actualPath).parent_path();
-        std::unordered_map<int, int> wavIdToHandle;
-
-        for (const auto& [id, filename] : bmsData.wavDefs) {
-            fs::path wavPath = bmsDir / filename;
-            // Try different extensions if file not found
-            if (!fs::exists(wavPath)) {
-                std::string stem = wavPath.stem().string();
-                fs::path parent = wavPath.parent_path();
-                for (const auto& ext : {".wav", ".ogg", ".mp3"}) {
-                    fs::path tryPath = parent / (stem + ext);
-                    if (fs::exists(tryPath)) {
-                        wavPath = tryPath;
-                        break;
-                    }
-                }
-            }
-            if (fs::exists(wavPath)) {
-                int handle = audio.loadSample(wavPath.string());
-                if (handle >= 0) {
-                    wavIdToHandle[id] = handle;
-                }
-            }
-        }
-
-        // Update notes with sample handles
-        for (auto& note : beatmap.notes) {
-            if (note.customIndex > 0) {
-                auto it = wavIdToHandle.find(note.customIndex);
-                if (it != wavIdToHandle.end()) {
-                    note.sampleHandle = it->second;
-                }
-            }
-        }
-
-        // Update storyboard samples (BGM) with handles
-        for (auto& sample : beatmap.storyboardSamples) {
-            if (sample.sampleHandle > 0) {
-                auto it = wavIdToHandle.find(sample.sampleHandle);
-                if (it != wavIdToHandle.end()) {
-                    sample.sampleHandle = it->second;
-                } else {
-                    sample.sampleHandle = -1;
-                }
-            }
-        }
-
-        // Load BGA images
-        hasBga = false;
-        isBmsBga = false;
-        if (!bmsData.bgaEvents.empty()) {
-            bmsBgaManager.init(renderer.getRenderer());
-            bmsBgaManager.load(bmsData.bgaEvents, bmsData.bmpDefs, bmsData.directory);
-            hasBga = true;
-            isBmsBga = true;
-            std::cout << "BMS BGA: " << bmsData.bgaEvents.size() << " events" << std::endl;
-        }
-
-        std::cout << "Loaded " << wavIdToHandle.size() << " WAV samples" << std::endl;
     } else if (isIIDX) {
         // Get difficulty index from version string
         int diffIdx = IIDXParser::SP_ANOTHER;  // Default
@@ -937,14 +2080,6 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
             return false;
         }
         std::cout << "Loaded IIDX chart: " << beatmap.keyCount << "K" << std::endl;
-
-        // Load S3P keysounds for IIDX
-        std::filesystem::path chartPath(actualPath);
-        std::string songId = chartPath.stem().string();  // e.g., "32083"
-        std::filesystem::path s3pPath = chartPath.parent_path() / (songId + ".s3p");
-        if (std::filesystem::exists(s3pPath)) {
-            keySoundManager.loadS3PSamples(s3pPath.string());
-        }
     } else if (isMalody) {
         if (!MalodyParser::parse(actualPath, beatmap)) {
             std::cerr << "Failed to parse Malody chart" << std::endl;
@@ -962,7 +2097,8 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
         // e.g., "silverTown4T_easy.txt" -> "silverTown"
         std::filesystem::path chartPath(actualPath);
         std::string chartName = chartPath.stem().string();
-        size_t keyPos = chartName.find("4T");
+        size_t keyPos = chartName.find("2T");
+        if (keyPos == std::string::npos) keyPos = chartName.find("4T");
         if (keyPos == std::string::npos) keyPos = chartName.find("6T");
         std::string songName = (keyPos != std::string::npos) ? chartName.substr(0, keyPos) : chartName;
 
@@ -981,7 +2117,14 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
                 std::cout << "Using cached MUSYNX audio: " << bgmWav << std::endl;
             } else {
                 std::cout << "Extracting MUSYNX audio from: " << acbPath << std::endl;
-                if (AcbParser::extractAndConvert(acbPath.string(), tempDir)) {
+                // Use proper UTF-parsed cue mapping for correct keysound alignment
+                auto cueToAwb = AcbParser::parseCueToAwbMapping(acbPath.string());
+                if (!cueToAwb.empty()) {
+                    AcbParser::extractAndConvertMapped(acbPath.string(), tempDir, cueToAwb);
+                } else {
+                    AcbParser::extractAndConvert(acbPath.string(), tempDir);
+                }
+                if (std::filesystem::exists(bgmWav)) {
                     beatmap.audioFilename = bgmWav;
                     std::cout << "MUSYNX audio extracted to: " << tempDir << std::endl;
                 }
@@ -1000,6 +2143,18 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
             return false;
         }
         std::cout << "Loaded StepMania chart: " << beatmap.keyCount << "K" << std::endl;
+    } else if (isVox) {
+        if (!VoxParser::parse(actualPath, beatmap)) {
+            std::cerr << "Failed to parse SDVX chart" << std::endl;
+            return false;
+        }
+        std::cout << "Loaded SDVX chart: " << beatmap.keyCount << "K" << std::endl;
+    } else if (isEZ2AC) {
+        if (!EZ2ACParser::parse(actualPath, beatmap)) {
+            std::cerr << "Failed to parse EZ2AC chart" << std::endl;
+            return false;
+        }
+        std::cout << "Loaded EZ2AC chart: " << beatmap.keyCount << "K" << std::endl;
     } else {
         if (!OsuParser::parse(beatmapPath, beatmap)) {
             std::cerr << "Failed to parse beatmap" << std::endl;
@@ -1134,7 +2289,7 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
             static PakExtractor pakExtractor;
             static bool keysLoaded = false;
             if (!keysLoaded) {
-                keysLoaded = pakExtractor.loadKeys("D:\\work\\DJMax_Online\\Xip-Pak-Extractor-main\\keyFiles");
+                keysLoaded = pakExtractor.loadKeys();
             }
             if (keysLoaded && pakExtractor.open(pakPath.string())) {
                 fs::path tempDir = fs::current_path() / "Data" / "Tmp" / pakPath.stem().string();
@@ -1249,7 +2404,7 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
     hpManager.setHPDrainRate(beatmap.hp);
 
     // Reset lane key states
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 18; i++) {
         laneKeyDown[i] = false;
     }
 
@@ -1362,12 +2517,12 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
         ppCalculator.init(totalNotes, currentStarRating);
 
         // Initialize next note index for each lane (for empty tap keysound)
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 18; i++) {
             laneNextNoteIndex[i] = -1;
         }
         for (size_t i = 0; i < beatmap.notes.size(); i++) {
             int lane = beatmap.notes[i].lane;
-            if (lane >= 0 && lane < 10 && laneNextNoteIndex[lane] == -1) {
+            if (lane >= 0 && lane < 18 && laneNextNoteIndex[lane] == -1) {
                 laneNextNoteIndex[lane] = static_cast<int>(i);
             }
         }
@@ -1376,8 +2531,9 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
 }
 
 void Game::startAsyncLoad(const std::string& path, bool isReplayMode) {
-    // Cancel any existing loading
+    // Cancel any existing loading and wait for previous thread to finish
     cancelLoading();
+    if (loadingThread.joinable()) loadingThread.join();
 
     // Store current state to return to on cancel
     stateBeforeLoading = state;
@@ -1461,8 +2617,10 @@ void Game::loadBeatmapAsync(const std::string& path) {
     bool isIIDX = actualPath.size() > 2 && actualPath.substr(actualPath.size() - 2) == ".1";
     bool isMalody = actualPath.size() > 3 && actualPath.substr(actualPath.size() - 3) == ".mc";
     bool isMuSynx = actualPath.size() > 4 && actualPath.substr(actualPath.size() - 4) == ".txt" &&
-                   (actualPath.find("4T_") != std::string::npos || actualPath.find("6T_") != std::string::npos);
+                   (actualPath.find("2T_") != std::string::npos || actualPath.find("4T_") != std::string::npos || actualPath.find("6T_") != std::string::npos);
     bool isStepMania = StepManiaParser::isStepManiaFile(actualPath);
+    bool isVox = actualPath.size() > 4 && actualPath.substr(actualPath.size() - 4) == ".vox";
+    bool isEZ2AC = EZ2ACParser::isEZ2ACFile(actualPath);
     std::string ptAudioDir;
 
     loadingProgress = 0.05f;
@@ -1507,6 +2665,12 @@ void Game::loadBeatmapAsync(const std::string& path) {
     } else if (isStepMania) {
         SET_STATUS("Parsing StepMania chart...");
         parseSuccess = StepManiaParser::parse(actualPath, beatmap);
+    } else if (isVox) {
+        SET_STATUS("Parsing SDVX chart...");
+        parseSuccess = VoxParser::parse(actualPath, beatmap);
+    } else if (isEZ2AC) {
+        SET_STATUS("Parsing EZ2AC chart...");
+        parseSuccess = EZ2ACParser::parse(actualPath, beatmap);
     } else {
         SET_STATUS("Parsing osu! chart...");
         parseSuccess = OsuParser::parse(path, beatmap);
@@ -1550,7 +2714,7 @@ void Game::loadBeatmapAsync(const std::string& path) {
             static PakExtractor pakExtractor;
             static bool keysLoaded = false;
             if (!keysLoaded) {
-                keysLoaded = pakExtractor.loadKeys("D:\\work\\DJMax_Online\\Xip-Pak-Extractor-main\\keyFiles");
+                keysLoaded = pakExtractor.loadKeys();
             }
             if (keysLoaded && pakExtractor.open(pakPath.string())) {
                 fs::path tempDir = fs::current_path() / "Data" / "Tmp" / pakPath.stem().string();
@@ -1586,7 +2750,8 @@ void Game::loadBeatmapAsync(const std::string& path) {
         try {
             std::filesystem::path chartPath(actualPath);
             std::string chartName = chartPath.stem().string();
-            size_t keyPos = chartName.find("4T");
+            size_t keyPos = chartName.find("2T");
+            if (keyPos == std::string::npos) keyPos = chartName.find("4T");
             if (keyPos == std::string::npos) keyPos = chartName.find("6T");
             std::string songName = (keyPos != std::string::npos) ? chartName.substr(0, keyPos) : chartName;
 
@@ -1600,14 +2765,21 @@ void Game::loadBeatmapAsync(const std::string& path) {
                 if (std::filesystem::exists(bgmWav)) {
                     beatmap.audioFilename = bgmWav;
                 } else {
-                    // Extract cue names from ACB file (in correct HCA order)
-                    auto acbCues = AcbParser::extractCueNames(acbPath.string());
-                    std::vector<std::string> cueNames;
-                    for (const auto& cue : acbCues) {
-                        cueNames.push_back(cue.name);
+                    // Use proper UTF-parsed cue mapping for correct keysound alignment
+                    auto cueToAwb = AcbParser::parseCueToAwbMapping(acbPath.string());
+                    if (!cueToAwb.empty()) {
+                        std::cerr << "[MUSYNX] Using UTF-parsed cue mapping: " << cueToAwb.size() << " entries" << std::endl;
+                        AcbParser::extractAndConvertMapped(acbPath.string(), tempDir, cueToAwb);
+                    } else {
+                        // Fallback to heuristic cue name extraction
+                        auto acbCues = AcbParser::extractCueNames(acbPath.string());
+                        std::vector<std::string> cueNames;
+                        for (const auto& cue : acbCues) {
+                            cueNames.push_back(cue.name);
+                        }
+                        std::cerr << "[MUSYNX] Fallback: extracted " << cueNames.size() << " cue names from ACB" << std::endl;
+                        AcbParser::extractAndConvert(acbPath.string(), tempDir, cueNames);
                     }
-                    std::cerr << "[MUSYNX] Extracted " << cueNames.size() << " cue names from ACB" << std::endl;
-                    AcbParser::extractAndConvert(acbPath.string(), tempDir, cueNames);
                     std::cerr << "[MUSYNX] Audio extraction complete" << std::endl;
                     beatmap.audioFilename = bgmWav;
                 }
@@ -1818,7 +2990,8 @@ void Game::renderBga() {
     }
 
     SDL_Renderer* sdlRenderer = renderer.getRenderer();
-    int windowW = 1280, windowH = 720;
+    int windowW, windowH;
+    SDL_GetRenderOutputSize(sdlRenderer, &windowW, &windowH);
 
     // Collect and sort layers by ID
     std::vector<int> layerIds;
@@ -1921,58 +3094,64 @@ void Game::run() {
             // Check if loading completed
             LoadingState ls = loadingState.load();
             if (ls == LoadingState::Completed) {
-                // Finalize loading on main thread (SDL operations)
                 if (loadingThread.joinable()) {
                     loadingThread.join();
                 }
-                // Call the synchronous loadBeatmap to do SDL operations (skip parsing since async already did it)
-                if (loadBeatmap(pendingBeatmapPath, true)) {
-                    if (pendingReplayMode) {
-                        // Setup replay mode
-                        replayMode = true;
-                        autoPlay = (replayInfo.mods & 2048) != 0;
-                        // Apply replay mods (don't modify settings, use local variables)
-                        bool replayHT = (replayInfo.mods & 256) != 0;
-                        bool replayDT = (replayInfo.mods & 64) != 0;
-                        bool replayNC = (replayInfo.mods & 512) != 0;
-                        if (replayNC) replayDT = true;
-
-                        if (replayDT) {
-                            clockRate = 1.5;
-                        } else if (replayHT) {
-                            clockRate = 0.75;
-                        } else {
-                            clockRate = 1.0;
-                        }
-                        audio.setPlaybackRate(clockRate);
-                        audio.setChangePitch(replayNC);
-
-                        currentStarRating = calculateStarRating(beatmap.notes, beatmap.keyCount,
-                            static_cast<StarRatingVersion>(settings.starRatingVersion), clockRate);
-                        ppCalculator.init(totalNotes, currentStarRating);
-                        judgementSystem.init(settings.judgeMode, beatmap.od, settings.customOD,
-                                             settings.judgements, baseBPM, clockRate);
-                        currentReplayFrame = 0;
-                        // Set window title for replay mode
-                        std::string title = "[REPLAY MODE] Mania Player - " + beatmap.artist + " " + beatmap.title +
-                                           " [" + beatmap.version + "](" + beatmap.creator + ") Player:" + replayInfo.playerName;
-                        renderer.setWindowTitle(title);
-                    } else {
-                        // Normal play mode - apply settings
-                        replayMode = false;
-                        autoPlay = settings.autoPlayEnabled || settings.cinemaEnabled;
-                    }
-                    state = GameState::Playing;
-                    musicStarted = false;
-                    startTime = SDL_GetTicks();
-                    std::cout << "[DEBUG] State set to Playing, hasBackgroundMusic=" << hasBackgroundMusic << std::endl;
-                    SDL_FlushEvent(SDL_EVENT_KEY_DOWN);
-                    SDL_FlushEvent(SDL_EVENT_KEY_UP);
-                } else {
+                if (pendingExport) {
+                    // Export done - return to song select
                     state = stateBeforeLoading;
+                    pendingExport = false;
+                } else {
+                    // Finalize loading on main thread (SDL operations)
+                    // Call the synchronous loadBeatmap to do SDL operations (skip parsing since async already did it)
+                    if (loadBeatmap(pendingBeatmapPath, true)) {
+                        if (pendingReplayMode) {
+                            // Setup replay mode
+                            replayMode = true;
+                            autoPlay = (replayInfo.mods & 2048) != 0;
+                            // Apply replay mods (don't modify settings, use local variables)
+                            bool replayHT = (replayInfo.mods & 256) != 0;
+                            bool replayDT = (replayInfo.mods & 64) != 0;
+                            bool replayNC = (replayInfo.mods & 512) != 0;
+                            if (replayNC) replayDT = true;
+
+                            if (replayDT) {
+                                clockRate = 1.5;
+                            } else if (replayHT) {
+                                clockRate = 0.75;
+                            } else {
+                                clockRate = 1.0;
+                            }
+                            audio.setPlaybackRate(clockRate);
+                            audio.setChangePitch(replayNC);
+
+                            currentStarRating = calculateStarRating(beatmap.notes, beatmap.keyCount,
+                                static_cast<StarRatingVersion>(settings.starRatingVersion), clockRate);
+                            ppCalculator.init(totalNotes, currentStarRating);
+                            judgementSystem.init(settings.judgeMode, beatmap.od, settings.customOD,
+                                                 settings.judgements, baseBPM, clockRate);
+                            currentReplayFrame = 0;
+                            // Set window title for replay mode
+                            std::string title = "[REPLAY MODE] Mania Player - " + beatmap.artist + " " + beatmap.title +
+                                               " [" + beatmap.version + "](" + beatmap.creator + ") Player:" + replayInfo.playerName;
+                            renderer.setWindowTitle(title);
+                        } else {
+                            // Normal play mode - apply settings
+                            replayMode = false;
+                            autoPlay = settings.autoPlayEnabled || settings.cinemaEnabled;
+                        }
+                        state = GameState::Playing;
+                        musicStarted = false;
+                        startTime = SDL_GetTicks();
+                        std::cout << "[DEBUG] State set to Playing, hasBackgroundMusic=" << hasBackgroundMusic << std::endl;
+                        SDL_FlushEvent(SDL_EVENT_KEY_DOWN);
+                        SDL_FlushEvent(SDL_EVENT_KEY_UP);
+                    } else {
+                        state = stateBeforeLoading;
+                    }
+                    pendingReplayMode = false;
                 }
                 loadingState = LoadingState::Idle;
-                pendingReplayMode = false;
             } else if (ls == LoadingState::Failed || ls == LoadingState::Cancelled) {
                 if (loadingThread.joinable()) {
                     loadingThread.join();
@@ -1980,6 +3159,7 @@ void Game::run() {
                 state = stateBeforeLoading;
                 loadingState = LoadingState::Idle;
                 pendingReplayMode = false;
+                pendingExport = false;
             }
         }
 
@@ -2139,6 +3319,7 @@ void Game::handleInput() {
             else if (state == GameState::Loading) {
                 if (e.key.key == SDLK_ESCAPE) {
                     cancelLoading();
+                    if (loadingThread.joinable()) loadingThread.join();
                     state = stateBeforeLoading;
                 }
             }
@@ -2448,12 +3629,9 @@ void Game::handleInput() {
                     case SDLK_RETURN:
                     case SDLK_KP_ENTER:
                         if (pauseMenuSelection == 0) {
-                            // Resume with fade out (audio resumes after fade completes)
-                            // For keysound-only maps, adjust startTime immediately to prevent time jump
-                            if (!hasBackgroundMusic) {
-                                int64_t pausedDuration = SDL_GetTicks() - pauseTime;
-                                startTime += pausedDuration;
-                            }
+                            // Resume: compensate pause duration now, fadeout duration later
+                            int64_t pausedDuration = SDL_GetTicks() - pauseTime;
+                            startTime += pausedDuration;
                             pauseFadingOut = true;
                             pauseFadeOutStart = SDL_GetTicks();
                             state = GameState::Playing;
@@ -2475,12 +3653,9 @@ void Game::handleInput() {
                         }
                         break;
                     case SDLK_ESCAPE: {
-                        // ESC also resumes with fade out
-                        // For keysound-only maps, adjust startTime immediately to prevent time jump
-                        if (!hasBackgroundMusic) {
-                            int64_t pausedDuration = SDL_GetTicks() - pauseTime;
-                            startTime += pausedDuration;
-                        }
+                        // ESC also resumes: compensate pause duration now
+                        int64_t pausedDuration = SDL_GetTicks() - pauseTime;
+                        startTime += pausedDuration;
                         pauseFadingOut = true;
                         pauseFadeOutStart = SDL_GetTicks();
                         state = GameState::Playing;
@@ -2542,6 +3717,9 @@ void Game::handleInput() {
                         // If already fading out from previous resume, keep the frozen pauseGameTime
                         if (!pauseFadingOut) {
                             pauseGameTime = getCurrentGameTime();
+                        } else {
+                            // Interrupted fadeout: compensate elapsed fadeout time
+                            startTime += (SDL_GetTicks() - pauseFadeOutStart);
                         }
                         pauseFadingOut = false;  // Cancel any ongoing fade out
                         audio.pause();
@@ -2549,7 +3727,7 @@ void Game::handleInput() {
                         pauseTime = SDL_GetTicks();
                         pauseMenuSelection = 0;
                         // Reset key states to prevent stuck pressed state
-                        for (int i = 0; i < 10; i++) {
+                        for (int i = 0; i < 18; i++) {
                             laneKeyDown[i] = false;
                         }
                         renderer.resetKeyReleaseTime();
@@ -2742,7 +3920,7 @@ void Game::update() {
     // Replay mode ignores Death mod
     if (settings.deathEnabled && !replayMode && hpManager.getTargetHP() <= 0.0 && !autoPlay) {
         state = GameState::Dead;
-        deathTime = currentTime;
+        deathTime = SDL_GetTicks();
         deathSlowdown = 1.0f;
         deathMenuSelection = 1;  // Default to Retry
         audio.pause();
@@ -3265,6 +4443,8 @@ void Game::render() {
                 else if (song.source == BeatmapSource::MuSynx) sourceLabel = "MUSYNX";
                 else if (song.source == BeatmapSource::IIDX) sourceLabel = "IIDX";
                 else if (song.source == BeatmapSource::StepMania) sourceLabel = "StepMania";
+                else if (song.source == BeatmapSource::SDVX) sourceLabel = "SDVX";
+                else if (song.source == BeatmapSource::EZ2AC) sourceLabel = "EZ2AC";
                 renderer.renderTextRight(sourceLabel, 1280 - 20, y + 10);
             }
 
@@ -3431,6 +4611,11 @@ void Game::render() {
                     lineY += (float)fontH;
                 }
             }
+        }
+
+        // Export Beatmap button (above Back)
+        if (renderer.renderButton("Export .osz", 20, 720 - 35 - 20 - 35 - 10, 120, 35, mouseX, mouseY, mouseClicked)) {
+            exportBeatmap();
         }
 
         // Back button
@@ -4008,6 +5193,10 @@ void Game::render() {
                         parseSuccess = IIDXParser::parse(actualPath, videoBeatmap, iidxDiffIdx);
                     } else if (ext == ".sm" || ext == ".ssc") {
                         parseSuccess = StepManiaParser::parse(actualPath, videoBeatmap);
+                    } else if (ext == ".vox") {
+                        parseSuccess = VoxParser::parse(actualPath, videoBeatmap);
+                    } else if (ext == ".ez") {
+                        parseSuccess = EZ2ACParser::parse(actualPath, videoBeatmap);
                     }
 
                     if (parseSuccess) {
@@ -4287,6 +5476,10 @@ void Game::render() {
                 renderer.renderLabel("Buffer Size", contentX, row2Y);
                 int oldBuf = settings.audioBufferSize;
                 settings.audioBufferSize = renderer.renderSliderWithValue(contentX + 120, row2Y, 200, settings.audioBufferSize, 5, 200, mouseX, mouseY, mouseDown);
+                if (oldBuf != settings.audioBufferSize && !mouseDown) {
+                    audio.reinitialize(settings.audioOutputMode, settings.audioDevice,
+                                       settings.audioBufferSize, settings.asioDevice);
+                }
                 char bufStr[16];
                 snprintf(bufStr, sizeof(bufStr), "%dms", settings.audioBufferSize);
                 renderer.renderLabel(bufStr, contentX + 330, row2Y);
@@ -4308,8 +5501,14 @@ void Game::render() {
             settings.volume = renderer.renderSliderWithValue(contentX + 80, row3Y, 200, settings.volume, 0, 100, mouseX, mouseY, mouseDown);
             audio.setVolume(settings.volume);
 
+            // Keysound Volume
+            float row3bY = row3Y + 40;
+            renderer.renderLabel("Keysound Volume", contentX, row3bY);
+            settings.keysoundVolume = renderer.renderSliderWithValue(contentX + 160, row3bY, 200, settings.keysoundVolume, 0, 100, mouseX, mouseY, mouseDown);
+            keySoundManager.setKeysoundVolume(settings.keysoundVolume);
+
             // Audio Offset
-            float row4Y = row3Y + 40;
+            float row4Y = row3bY + 40;
             renderer.renderLabel("Audio Offset", contentX, row4Y);
             settings.audioOffset = renderer.renderSliderWithValue(contentX + 120, row4Y, 200, settings.audioOffset, -300, 300, mouseX, mouseY, mouseDown);
             char offsetStr[16];
@@ -4325,9 +5524,10 @@ void Game::render() {
         }
         else if (settingsCategory == SettingsCategory::Input) {
             // Key count dropdown
-            const char* keyCounts[] = {"1K", "2K", "3K", "4K", "5K", "6K", "7K", "8K", "9K", "10K"};
+            const char* keyCounts[] = {"1K", "2K", "3K", "4K", "5K", "6K", "7K", "8K", "9K", "10K",
+                                       "11K", "12K", "13K", "14K", "15K", "16K", "17K", "18K"};
             int oldKeyCount = settings.selectedKeyCount;
-            settings.selectedKeyCount = renderer.renderDropdown(nullptr, keyCounts, 10,
+            settings.selectedKeyCount = renderer.renderDropdown(nullptr, keyCounts, 18,
                 settings.selectedKeyCount - 1, contentX, scrolledY, 80, mouseX, mouseY, mouseClicked, keyCountDropdownExpanded) + 1;
 
             // Update defaults when key count changes
@@ -4382,34 +5582,6 @@ void Game::render() {
                     }
                 } else if (oldN1 != settings.n1Style) {
                     settings.setDefaultColors(8);
-                }
-            }
-
-            // Lane color settings (to the right of dropdown)
-            if (!keyCountDropdownExpanded) {
-                float colorX = contentX + 250;  // Right side of dropdown
-                float colorY = scrolledY;
-                renderer.renderLabel("Lane Colors:", colorX, colorY);
-                colorY += 30;
-
-                // Lane numbers row
-                float colorBoxSize = 30;
-                float colorSpacing = 35;
-                for (int i = 0; i < settings.selectedKeyCount; i++) {
-                    char numBuf[4];
-                    snprintf(numBuf, sizeof(numBuf), "%d", i + 1);
-                    renderer.renderText(numBuf, colorX + i * colorSpacing + 8, colorY);
-                }
-                colorY += 25;
-
-                // Color boxes row
-                for (int i = 0; i < settings.selectedKeyCount; i++) {
-                    float boxX = colorX + i * colorSpacing;
-                    if (renderer.renderColorBox(settings.laneColors[i], boxX, colorY, colorBoxSize, mouseX, mouseY, mouseClicked)) {
-                        int colorVal = static_cast<int>(settings.laneColors[i]);
-                        colorVal = (colorVal + 1) % 4;
-                        settings.laneColors[i] = static_cast<NoteColor>(colorVal);
-                    }
                 }
             }
         }
@@ -4644,7 +5816,11 @@ void Game::render() {
             if (renderer.renderCheckbox("Double Time", settings.doubleTimeEnabled,
                                          contentX, scrolledY + 400, mouseX, mouseY, mouseClicked)) {
                 settings.doubleTimeEnabled = !settings.doubleTimeEnabled;
-                if (settings.doubleTimeEnabled) settings.halfTimeEnabled = false;
+                if (settings.doubleTimeEnabled) {
+                    settings.halfTimeEnabled = false;
+                } else {
+                    settings.nightcoreEnabled = false;
+                }
             }
             renderer.renderText("1.5x speed", contentX + 20, scrolledY + 430);
 
@@ -4654,6 +5830,8 @@ void Game::render() {
                 if (settings.nightcoreEnabled) {
                     settings.doubleTimeEnabled = true;  // NC auto-enables DT
                     settings.halfTimeEnabled = false;
+                } else {
+                    settings.doubleTimeEnabled = false;
                 }
             }
             renderer.renderText("1.5x speed + pitch up", contentX + 20, scrolledY + 490);
@@ -4738,6 +5916,9 @@ void Game::render() {
 
         // Reset clip rect before rendering Close button
         SDL_SetRenderClipRect(renderer.getRenderer(), nullptr);
+
+        // Render any expanded dropdown overlay on top of all controls
+        renderer.renderDropdownOverlay();
 
         // Clear Index button
         if (renderer.renderButton("Clear Index", winX + 800 - 208, winY + 500 - 45, 116, 30, mouseX, mouseY, mouseClicked)) {
@@ -5027,24 +6208,20 @@ void Game::render() {
             float alpha = 1.0f - std::min(1.0f, elapsed / 2000.0f);  // 2 second fade out
             if (alpha > 0) {
                 renderer.renderPauseMenu(pauseMenuSelection, alpha);
+                float remaining = (2000.0f - elapsed) / 1000.0f;
+                if (remaining < 0) remaining = 0;
+                renderer.renderPauseCountdown(remaining, 1.0f);
             } else {
-                // Fade out complete, now adjust time and resume audio
+                // Fade out complete: pause duration already compensated at resume time,
+                // only add fadeout duration here
                 pauseFadingOut = false;
-                // If music hadn't started yet (paused during prepare time), just adjust startTime
-                if (!musicStarted) {
-                    int64_t totalPausedDuration = SDL_GetTicks() - pauseTime;
-                    startTime += totalPausedDuration;
-                } else if (hasBackgroundMusic) {
-                    // For BGM maps, adjust startTime now
-                    int64_t totalPausedDuration = SDL_GetTicks() - pauseTime;
-                    startTime += totalPausedDuration;
+                int64_t fadeoutDuration = SDL_GetTicks() - pauseFadeOutStart;
+                startTime += fadeoutDuration;
+                if (musicStarted && hasBackgroundMusic) {
                     pauseAudioOffset = pauseGameTime - (audio.getPosition() + settings.audioOffset);
                     audio.resume();
                     audio.resumeAllSamples();
-                } else {
-                    // For keysound-only maps, add fadeout duration to startTime
-                    int64_t fadeoutDuration = SDL_GetTicks() - pauseFadeOutStart;
-                    startTime += fadeoutDuration;
+                } else if (!hasBackgroundMusic && musicStarted) {
                     audio.resume();
                     audio.resumeAllSamples();
                 }
@@ -5172,7 +6349,7 @@ Judgement Game::checkJudgement(int lane, int64_t atTime) {
                 return Judgement::Miss;
             }
             // Outside miss window - play empty tap keysound and ignore keypress
-            if (lane >= 0 && lane < 10 && laneNextNoteIndex[lane] >= 0 &&
+            if (lane >= 0 && lane < 18 && laneNextNoteIndex[lane] >= 0 &&
                 laneNextNoteIndex[lane] < static_cast<int>(beatmap.notes.size())) {
                 const Note& nextNote = beatmap.notes[laneNextNoteIndex[lane]];
                 keySoundManager.playKeySound(nextNote, false);
@@ -5220,7 +6397,7 @@ Judgement Game::checkJudgement(int lane, int64_t atTime) {
                 return Judgement::Miss;
             }
             // Outside miss window - play empty tap keysound and ignore keypress
-            if (lane >= 0 && lane < 10 && laneNextNoteIndex[lane] >= 0 &&
+            if (lane >= 0 && lane < 18 && laneNextNoteIndex[lane] >= 0 &&
                 laneNextNoteIndex[lane] < static_cast<int>(beatmap.notes.size())) {
                 const Note& nextNote = beatmap.notes[laneNextNoteIndex[lane]];
                 keySoundManager.playKeySound(nextNote, false);
@@ -5233,7 +6410,7 @@ Judgement Game::checkJudgement(int lane, int64_t atTime) {
 
     // No note hit - play empty tap keysound (next note's keysound in this lane)
     SDL_Log("Empty tap: lane=%d laneNextNoteIndex=%d", lane, laneNextNoteIndex[lane]);
-    if (lane >= 0 && lane < 10 && laneNextNoteIndex[lane] >= 0 &&
+    if (lane >= 0 && lane < 18 && laneNextNoteIndex[lane] >= 0 &&
         laneNextNoteIndex[lane] < static_cast<int>(beatmap.notes.size())) {
         const Note& nextNote = beatmap.notes[laneNextNoteIndex[lane]];
         SDL_Log("  Playing empty tap keysound for note at time=%lld", (long long)nextNote.time);
@@ -5460,7 +6637,7 @@ void Game::processJudgement(Judgement j, int lane) {
     // Replay mode ignores Sudden Death mod
     if (settings.suddenDeathEnabled && !replayMode && j == Judgement::Miss && !autoPlay) {
         state = GameState::Dead;
-        deathTime = getCurrentGameTime();
+        deathTime = SDL_GetTicks();
         deathSlowdown = 1.0f;
         deathMenuSelection = 1;  // Default to Retry
         if (hasBackgroundMusic) {
@@ -5655,6 +6832,8 @@ static const char* sourceToString(BeatmapSource src) {
         case BeatmapSource::MuSynx: return "MUSYNX MUSYNC";
         case BeatmapSource::IIDX: return "Beatmania IIDX";
         case BeatmapSource::StepMania: return "StepMania";
+        case BeatmapSource::SDVX: return "Sound Voltex";
+        case BeatmapSource::EZ2AC: return "EZ2AC";
         default: return "";
     }
 }
@@ -5760,7 +6939,7 @@ static std::vector<SearchToken> parseSearchTokens(const std::string& search) {
 
             bool isNumericKey = (key == "star" || key == "stars" || key == "sr" ||
                                  key == "hp" || key == "od" || key == "bpm" ||
-                                 key == "length" || key == "keys");
+                                 key == "length" || key == "key" || key == "keys");
             bool isStringKey = (key == "creator" || key == "author" || key == "mapper" ||
                                 key == "artist" || key == "title" || key == "diff" ||
                                 key == "source" || key == "tag");
@@ -5816,7 +6995,7 @@ static double getDiffNumericValue(const DifficultyInfo& d, const std::string& ke
     if (key == "od") return d.od;
     if (key == "bpm") return d.bpmMost > 0 ? d.bpmMost : d.bpmMax;
     if (key == "length") return d.totalLength / 1000.0;
-    if (key == "keys") return d.keyCount;
+    if (key == "keys" || key == "key") return d.keyCount;
     return 0;
 }
 
@@ -6027,13 +7206,13 @@ void Game::scanSongsFolder() {
                 if (ext == ".osu" || ext == ".sm" || ext == ".ssc" ||
                     ext == ".bms" || ext == ".bme" || ext == ".bml" || ext == ".pms" ||
                     ext == ".ojn" || ext == ".pt" || ext == ".bytes" ||
-                    ext == ".mc" || ext == ".1") {
+                    ext == ".mc" || ext == ".1" || ext == ".vox" || ext == ".ez") {
                     return true;
                 }
                 // MUSYNX .txt files
                 if (ext == ".txt") {
                     std::string fname = file.path().filename().string();
-                    if (fname.find("4T") != std::string::npos || fname.find("6T") != std::string::npos) {
+                    if (fname.find("2T") != std::string::npos || fname.find("4T") != std::string::npos || fname.find("6T") != std::string::npos) {
                         return true;
                     }
                 }
@@ -6731,7 +7910,7 @@ void Game::scanSongsFolder() {
                             static PakExtractor bgPakExtractor;
                             static bool bgKeysLoaded = false;
                             if (!bgKeysLoaded) {
-                                bgKeysLoaded = bgPakExtractor.loadKeys("D:\\work\\DJMax_Online\\Xip-Pak-Extractor-main\\keyFiles");
+                                bgKeysLoaded = bgPakExtractor.loadKeys();
                                 SDL_Log("[PAK BG] Keys loaded: %d", bgKeysLoaded);
                             }
                             if (bgKeysLoaded && bgPakExtractor.open(pakPath.string())) {
@@ -6916,7 +8095,7 @@ void Game::scanSongsFolder() {
             } else if (ext == ".txt") {
                 // MUSYNX chart - check for 4T or 6T in filename
                 std::string fname = file.path().filename().string();
-                if (fname.find("4T") != std::string::npos || fname.find("6T") != std::string::npos) {
+                if (fname.find("2T") != std::string::npos || fname.find("4T") != std::string::npos || fname.find("6T") != std::string::npos) {
                     song.source = BeatmapSource::MuSynx;
 
                     DifficultyInfo diff;
@@ -6928,8 +8107,7 @@ void Game::scanSongsFolder() {
                     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
                     if (lower.find("_easy") != std::string::npos) diff.version = "Easy";
                     else if (lower.find("_hard") != std::string::npos) diff.version = "Hard";
-                    else if (lower.find("_in.") != std::string::npos || lower.find("_in4t") != std::string::npos ||
-                             lower.find("_in6t") != std::string::npos) diff.version = "Inferno";
+                    else if (lower.find("_in") != std::string::npos) diff.version = "Inferno";
                     else diff.version = "Normal";
 
                     // Parse to get star rating
@@ -6980,6 +8158,127 @@ void Game::scanSongsFolder() {
                     song.beatmapFiles.push_back(diff.path);
                     song.difficulties.push_back(diff);
                 }
+            } else if (ext == ".vox") {
+                // Sound Voltex chart
+                song.source = BeatmapSource::SDVX;
+
+                DifficultyInfo diff;
+                diff.path = file.path().string();
+                diff.keyCount = 6;
+                diff.version = VoxParser::getDifficultyName(file.path().filename().string());
+                // Append level from SongDB (e.g. "NOV" -> "NOV 5")
+                {
+                    int songId = VoxParser::getSongIdFromPath(diff.path);
+                    static auto sdvxDB = getSDVXSongDB();
+                    auto dbIt = sdvxDB.find(songId);
+                    if (dbIt != sdvxDB.end()) {
+                        int level = 0;
+                        if (diff.version == "NOV") level = dbIt->second.nov;
+                        else if (diff.version == "ADV") level = dbIt->second.adv;
+                        else if (diff.version == "EXH") level = dbIt->second.exh;
+                        else if (diff.version == "MXM") level = dbIt->second.mxm;
+                        else {
+                            // 4th difficulty (_4i): name depends on infVer
+                            level = dbIt->second.inf;
+                            switch (dbIt->second.infVer) {
+                                case 2: diff.version = "INF"; break;
+                                case 3: diff.version = "GRV"; break;
+                                case 4: diff.version = "HVN"; break;
+                                case 5: diff.version = "VVD"; break;
+                                case 6: diff.version = "XCD"; break;
+                                default: break;
+                            }
+                        }
+                        if (level > 0) diff.version += " " + std::to_string(level);
+                    }
+                }
+                diff.hash = OsuParser::calculateMD5(diff.path);
+
+                BeatmapInfo tempInfo;
+                if (VoxParser::parse(diff.path, tempInfo)) {
+                    diff.creator = tempInfo.creator;
+                    diff.starRatings[0] = calculateStarRating(tempInfo.notes, diff.keyCount,
+                        StarRatingVersion::OsuStable_b20260101);
+                    diff.starRatings[1] = calculateStarRating(tempInfo.notes, diff.keyCount,
+                        StarRatingVersion::OsuStable_b20220101);
+                    extractDiffMetadata(diff, tempInfo);
+                }
+
+                song.beatmapFiles.push_back(diff.path);
+                song.difficulties.push_back(diff);
+            } else if (ext == ".ez") {
+                // EZ2AC chart
+                EZ2ACMode ezMode = EZ2ACParser::detectMode(file.path().string());
+                if (ezMode == EZ2ACMode::Catch ||
+                    ezMode == EZ2ACMode::Unknown)
+                    continue;
+
+                song.source = BeatmapSource::EZ2AC;
+
+                DifficultyInfo diff;
+                diff.path = file.path().string();
+                diff.keyCount = EZ2ACParser::modeKeyCount(ezMode);
+                diff.version = EZ2ACParser::modeName(ezMode);
+                diff.hash = OsuParser::calculateMD5(diff.path);
+
+                // Look up SongDB for level and BPM
+                float songDbBpm = 0;
+                {
+                    static auto ez2acDB = getEZ2ACSongDB();
+                    std::string folderName = fs::path(diff.path).parent_path().filename().string();
+                    auto dbIt = ez2acDB.find(folderName);
+                    if (dbIt != ez2acDB.end()) {
+                        songDbBpm = dbIt->second.bpm;
+                        // Map EZ2ACMode to SongDB mode index
+                        int modeIdx = -1;
+                        switch (ezMode) {
+                            case EZ2ACMode::FiveKey:        modeIdx = 0; break;
+                            case EZ2ACMode::StreetMix:      modeIdx = 1; break;
+                            case EZ2ACMode::SevenStreetMix: modeIdx = 2; break;
+                            case EZ2ACMode::ClubMix:        modeIdx = 3; break;
+                            case EZ2ACMode::SpaceMix:       modeIdx = 4; break;
+                            case EZ2ACMode::Catch:          modeIdx = 5; break;
+                            case EZ2ACMode::RubyMix:        modeIdx = 6; break;
+                            case EZ2ACMode::ScratchMix:     modeIdx = 7; break;
+                            default: break;
+                        }
+                        if (modeIdx >= 0) {
+                            // Detect difficulty slot from filename suffix
+                            std::string stem = fs::path(diff.path).stem().string();
+                            std::string stemLower = stem;
+                            std::transform(stemLower.begin(), stemLower.end(), stemLower.begin(), ::tolower);
+                            int diffSlot = 0; // default = EZ
+                            if (stemLower.length() >= 4 && stemLower.substr(stemLower.length() - 4) == "-shd")
+                                diffSlot = 2; // HD
+                            else if (stemLower.length() >= 3 && stemLower.substr(stemLower.length() - 3) == "-hd")
+                                diffSlot = 1; // NM
+
+                            int level = dbIt->second.levels[modeIdx][diffSlot];
+                            if (level > 0)
+                                diff.version += " Lv." + std::to_string(level);
+                        }
+                    }
+                }
+
+                BeatmapInfo tempInfo;
+                if (EZ2ACParser::parse(diff.path, tempInfo)) {
+                    diff.creator = tempInfo.creator;
+                    diff.starRatings[0] = calculateStarRating(tempInfo.notes, diff.keyCount,
+                        StarRatingVersion::OsuStable_b20260101);
+                    diff.starRatings[1] = calculateStarRating(tempInfo.notes, diff.keyCount,
+                        StarRatingVersion::OsuStable_b20220101);
+                    extractDiffMetadata(diff, tempInfo);
+                }
+
+                // SongDB BPM as fallback if timing points didn't provide one
+                if (diff.bpmMost == 0 && songDbBpm > 0) {
+                    diff.bpmMin = songDbBpm;
+                    diff.bpmMax = songDbBpm;
+                    diff.bpmMost = songDbBpm;
+                }
+
+                song.beatmapFiles.push_back(diff.path);
+                song.difficulties.push_back(diff);
             }
         }
 
@@ -7207,7 +8506,50 @@ void Game::scanSongsFolder() {
                     }
                 }
             }
+            if (song.previewTime <= 0) {
+                song.previewTime = -1;  // 40% position fallback
+            }
+        } else if (song.source == BeatmapSource::SDVX) {
+            BeatmapInfo info;
+            if (VoxParser::parse(firstFile, info)) {
+                song.title = info.title;
+                song.artist = info.artist;
+            }
+            // Audio: {folder}/{folder}.s3v
+            fs::path voxDir = fs::path(firstFile).parent_path();
+            std::string folderName2 = voxDir.filename().string();
+            fs::path audioFile = voxDir / (folderName2 + ".s3v");
+            if (fs::exists(audioFile)) {
+                song.audioPath = audioFile.string();
+            }
+            // Jacket image: jk_{id}_1_b.png
+            for (const auto& f : fs::directory_iterator(voxDir)) {
+                if (!f.is_regular_file()) continue;
+                std::string fname = f.path().filename().string();
+                if (fname.find("jk_") == 0 && fname.find("_1_b.") != std::string::npos) {
+                    song.backgroundPath = f.path().string();
+                    break;
+                }
+            }
             song.previewTime = -1;  // 40% position
+        } else if (song.source == BeatmapSource::EZ2AC) {
+            // EZ2AC has no text-based song titles (only bitmap images in songname/)
+            // EZFF header contains chart filename, not song title — use folder name
+            song.title = song.folderName;
+            song.artist = "EZ2AC";
+            // EZ2AC is keysound-only, no separate audio file
+            // Look for background image in song folder
+            fs::path ezDir = fs::path(firstFile).parent_path();
+            for (const auto& f : fs::directory_iterator(ezDir)) {
+                if (!f.is_regular_file()) continue;
+                std::string ext = f.path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if (ext == ".jpg" || ext == ".png" || ext == ".jpeg" || ext == ".bmp") {
+                    song.backgroundPath = f.path().string();
+                    break;
+                }
+            }
+            song.previewTime = -1;
         }
 
         if (song.title.empty()) {
@@ -7591,7 +8933,7 @@ void Game::updatePreviewFade() {
             currentPreviewAudioPath.clear();
             previewFading = false;
             // If there's a target song, play it
-            if (previewTargetIndex >= 0) {
+            if (previewTargetIndex >= 0 && previewTargetIndex < (int)songList.size()) {
                 const SongEntry& song = songList[previewTargetIndex];
                 // Determine audio path and preview time from difficulty if available
                 std::string audioPath;

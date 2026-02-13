@@ -68,7 +68,9 @@ enum class BeatmapSource {
     Malody,
     MuSynx,
     IIDX,          // beatmania IIDX (.1 files)
-    StepMania      // StepMania (.sm/.ssc files)
+    StepMania,     // StepMania (.sm/.ssc files)
+    SDVX,          // Sound Voltex (.vox files)
+    EZ2AC          // EZ2AC (.ez files)
 };
 
 // Difficulty info for song select
@@ -109,7 +111,7 @@ struct SongEntry {
     std::string audioPath;       // Path to audio file
     std::string sourceText;      // Source metadata (e.g. "Touhou", "Vocaloid")
     std::string tags;            // Space-separated tags
-    int previewTime;             // Preview start time in ms
+    int previewTime = 0;         // Preview start time in ms
     std::vector<std::string> beatmapFiles;  // List of beatmap files (legacy)
     std::vector<DifficultyInfo> difficulties;  // Detailed difficulty info
     BeatmapSource source;        // osu!, DJMAX, O2Jam
@@ -137,6 +139,7 @@ private:
     std::string saveReplayDialog();
     std::string saveImageDialog();
     std::string openSkinFolderDialog();
+    void exportBeatmap();  // Export selected song to osu! format
     void handleInput();
     void update();
     void render();
@@ -236,8 +239,8 @@ private:
     int mouseX, mouseY;
     bool mouseClicked;
     bool mouseDown;
-    bool laneKeyDown[10];  // track key state for each lane (up to 10k)
-    int laneNextNoteIndex[10];  // index of next note in each lane (for empty tap keysound)
+    bool laneKeyDown[18];  // track key state for each lane (up to 18k)
+    int laneNextNoteIndex[18];  // index of next note in each lane (for empty tap keysound)
 
     Settings settings;
     SettingsCategory settingsCategory;
@@ -386,6 +389,10 @@ private:
     void startAsyncLoad(const std::string& path, bool isReplayMode = false);
     void loadBeatmapAsync(const std::string& path);
     void cancelLoading();
+
+    // Async Export
+    bool pendingExport = false;  // True when Loading state is for export (not beatmap load)
+    void exportBeatmapAsync();
 
     // Debug logging
     std::vector<DebugLogEntry> debugLog;

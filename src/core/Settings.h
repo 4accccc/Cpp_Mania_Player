@@ -37,6 +37,7 @@ enum class NoteColor {
 
 struct Settings {
     int volume;
+    int keysoundVolume;
     int audioDevice;
     int audioOffset;  // Audio offset in ms (negative = notes earlier, positive = notes later)
     int audioOutputMode;  // 0=DirectSound, 1=WASAPI Shared, 2=WASAPI Exclusive, 3=ASIO
@@ -50,10 +51,11 @@ struct Settings {
     bool borderlessFullscreen;
     bool laneLight;  // Lane highlight effect
 
-    // Key settings for 1-10k
-    int selectedKeyCount;  // Currently selected key count in settings (1-10)
-    SDL_Keycode keys[10][10];  // Keys for each key count [keyCount-1][lane]
-    NoteColor laneColors[10];  // Colors for each lane
+    // Key settings for 1-18k
+    static const int MAX_KEYS = 18;
+    int selectedKeyCount;  // Currently selected key count in settings
+    SDL_Keycode keys[MAX_KEYS][MAX_KEYS];  // Keys for each key count [keyCount-1][lane]
+    NoteColor laneColors[MAX_KEYS];  // Colors for each lane
     bool n1Style;  // 8k N+1 style
     bool mirror;   // 8k N+1 mirror
 
@@ -103,6 +105,7 @@ struct Settings {
 
     Settings() {
         volume = 100;
+        keysoundVolume = 100;
         audioDevice = 0;
         audioOffset = 0;  // Default no offset
         audioOutputMode = 0;  // DirectSound
@@ -121,15 +124,15 @@ struct Settings {
         mirror = true;  // Default to mirror mode for 8K
 
         // Initialize all keys for all key counts
-        for (int k = 0; k < 10; k++) {
-            for (int i = 0; i < 10; i++) {
+        for (int k = 0; k < MAX_KEYS; k++) {
+            for (int i = 0; i < MAX_KEYS; i++) {
                 keys[k][i] = SDLK_UNKNOWN;
             }
             setDefaultKeys(k + 1);
         }
 
         // Initialize all colors and set defaults for 4K
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < MAX_KEYS; i++) {
             laneColors[i] = NoteColor::White;
         }
         setDefaultColors(4);
@@ -290,6 +293,15 @@ struct Settings {
                 laneColors[8] = NoteColor::White;
                 laneColors[9] = NoteColor::Blue;
                 break;
+            default:
+                // 11-18K: alternating white/blue with yellow center
+                for (int i = 0; i < keyCount; i++) {
+                    laneColors[i] = (i % 2 == 0) ? NoteColor::White : NoteColor::Blue;
+                }
+                if (keyCount % 2 == 1) {
+                    laneColors[keyCount / 2] = NoteColor::Yellow;
+                }
+                break;
         }
     }
 
@@ -342,23 +354,25 @@ struct Settings {
             case 8:
                 if (n1Style) {
                     if (mirror) {
-                        // 8K(R): K3,K4,K5,K6,K7,K8,S1
-                        keys[k][0] = SDLK_D;
-                        keys[k][1] = SDLK_F;
-                        keys[k][2] = SDLK_SPACE;
-                        keys[k][3] = SDLK_J;
-                        keys[k][4] = SDLK_K;
-                        keys[k][5] = SDLK_L;
-                        keys[k][6] = SDLK_LSHIFT;
-                    } else {
-                        // 8K(L): S1,K3,K4,K5,K6,K7,K8
-                        keys[k][0] = SDLK_LSHIFT;
+                        // 8K(R): K2,K3,K4,K5,K6,K7,K8,S1
+                        keys[k][0] = SDLK_S;
                         keys[k][1] = SDLK_D;
                         keys[k][2] = SDLK_F;
                         keys[k][3] = SDLK_SPACE;
                         keys[k][4] = SDLK_J;
                         keys[k][5] = SDLK_K;
                         keys[k][6] = SDLK_L;
+                        keys[k][7] = SDLK_LSHIFT;
+                    } else {
+                        // 8K(L): S1,K2,K3,K4,K5,K6,K7,K8
+                        keys[k][0] = SDLK_LSHIFT;
+                        keys[k][1] = SDLK_S;
+                        keys[k][2] = SDLK_D;
+                        keys[k][3] = SDLK_F;
+                        keys[k][4] = SDLK_SPACE;
+                        keys[k][5] = SDLK_J;
+                        keys[k][6] = SDLK_K;
+                        keys[k][7] = SDLK_L;
                     }
                 } else {
                     // Normal 8K: K1,K2,K3,K4,K6,K7,K8,K9

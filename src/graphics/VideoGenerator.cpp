@@ -99,42 +99,108 @@ void VideoGenerator::workerThread() {
     // Calculate judgements
     calculateJudgements();
 
-    // Render long image
     state_ = VideoGenState::Rendering;
-    std::vector<uint8_t> longImage(config_.width * totalHeight_ * 3, 0);
-    renderLongImage(longImage);
 
-    if (cancelRequested_) { state_ = VideoGenState::Cancelled; return; }
-
-    // Initialize encoder
-    state_ = VideoGenState::Encoding;
+    // Initialize encoder early (needed for segmented path)
     if (!initEncoder()) { state_ = VideoGenState::Failed; cleanup(); return; }
 
-    // Encode frames by scrolling through the long image
     int64_t totalFrames = (duration_ * config_.fps) / 1000;
     std::vector<uint8_t> framePixels(config_.width * config_.height * 3);
 
-    for (int64_t f = 0; f < totalFrames && !cancelRequested_; f++) {
-        int scrollY = (int)(f * config_.speed);
-        int srcY = totalHeight_ - config_.height - scrollY;
-        if (srcY < 0) srcY = 0;
+    // Determine if we need segmented rendering
+    const int64_t MAX_SEGMENT_BYTES = 256LL * 1024 * 1024; // 256MB per segment
+    int64_t totalImageBytes = (int64_t)config_.width * totalHeight_ * 3;
 
-        // Copy visible portion from long image
-        std::memset(framePixels.data(), 0, framePixels.size());
-        for (int y = 0; y < config_.height; y++) {
-            int imgY = srcY + y;
-            if (imgY >= 0 && imgY < totalHeight_) {
-                std::memcpy(&framePixels[y * config_.width * 3],
-                           &longImage[imgY * config_.width * 3],
-                           config_.width * 3);
+    if (totalImageBytes <= MAX_SEGMENT_BYTES) {
+        // Small enough - single allocation (existing fast path)
+        std::vector<uint8_t> longImage(totalImageBytes, 0);
+        renderLongImageRegion(longImage, 0, totalHeight_);
+
+        if (cancelRequested_) { state_ = VideoGenState::Cancelled; cleanup(); return; }
+
+        state_ = VideoGenState::Encoding;
+        for (int64_t f = 0; f < totalFrames && !cancelRequested_; f++) {
+            int scrollY = (int)(f * config_.speed);
+            int srcY = totalHeight_ - config_.height - scrollY;
+            if (srcY < 0) srcY = 0;
+
+            std::memset(framePixels.data(), 0, framePixels.size());
+            for (int y = 0; y < config_.height; y++) {
+                int imgY = srcY + y;
+                if (imgY >= 0 && imgY < totalHeight_) {
+                    std::memcpy(&framePixels[y * config_.width * 3],
+                               &longImage[imgY * config_.width * 3],
+                               config_.width * 3);
+                }
             }
-        }
 
-        if (!encodeFrame(framePixels.data(), f)) {
-            errorMessage_ = "Failed to encode frame";
-            state_ = VideoGenState::Failed; cleanup(); return;
+            if (!encodeFrame(framePixels.data(), f)) {
+                errorMessage_ = "Failed to encode frame";
+                state_ = VideoGenState::Failed; cleanup(); return;
+            }
+            progress_ = 0.3f + 0.7f * f / totalFrames;
         }
-        progress_ = 0.3f + 0.7f * f / totalFrames;
+    } else {
+        // Segmented rendering for long beatmaps
+        int segMaxHeight = (int)(MAX_SEGMENT_BYTES / ((int64_t)config_.width * 3));
+        // Ensure segment is at least 2x frame height for proper overlap
+        segMaxHeight = std::max(segMaxHeight, config_.height * 3);
+        int overlap = config_.height;  // overlap to handle frames at segment boundaries
+        int step = segMaxHeight - overlap;
+
+        std::cout << "VideoGenerator: Using segmented rendering (totalHeight=" << totalHeight_
+                  << ", segHeight=" << segMaxHeight << ", ~"
+                  << (totalImageBytes / (1024 * 1024)) << "MB total)" << std::endl;
+
+        state_ = VideoGenState::Encoding;
+        int64_t currentFrame = 0;
+
+        // Frames scroll from bottom to top: frame 0 reads near Y=totalHeight, last frame near Y=0
+        // Process segments from bottom to top
+        for (int segTop = std::max(0, totalHeight_ - segMaxHeight);
+             currentFrame < totalFrames && !cancelRequested_;
+             segTop -= step) {
+
+            if (segTop < 0) segTop = 0;
+            int segBottom = std::min(segTop + segMaxHeight, totalHeight_);
+            int segHeight = segBottom - segTop;
+
+            // Render this segment
+            std::vector<uint8_t> segPixels((int64_t)config_.width * segHeight * 3, 0);
+            renderLongImageRegion(segPixels, segTop, segHeight);
+
+            // Encode frames whose viewport falls within this segment
+            while (currentFrame < totalFrames && !cancelRequested_) {
+                int scrollY = (int)(currentFrame * config_.speed);
+                int srcY = totalHeight_ - config_.height - scrollY;
+                if (srcY < 0) srcY = 0;
+
+                // If viewport top is above this segment, we need the next segment (further up)
+                if (srcY < segTop) break;
+
+                // Copy from segment buffer (srcY is in absolute coords, offset to segment)
+                std::memset(framePixels.data(), 0, framePixels.size());
+                for (int y = 0; y < config_.height; y++) {
+                    int absY = srcY + y;
+                    int segY = absY - segTop;
+                    if (segY >= 0 && segY < segHeight) {
+                        std::memcpy(&framePixels[y * config_.width * 3],
+                                   &segPixels[segY * config_.width * 3],
+                                   config_.width * 3);
+                    }
+                }
+
+                if (!encodeFrame(framePixels.data(), currentFrame)) {
+                    errorMessage_ = "Failed to encode frame";
+                    state_ = VideoGenState::Failed; cleanup(); return;
+                }
+                progress_ = 0.3f + 0.7f * currentFrame / totalFrames;
+                currentFrame++;
+            }
+
+            // If we've reached the top of the image, no more segments needed
+            if (segTop == 0) break;
+        }
     }
 
     if (cancelRequested_) { state_ = VideoGenState::Cancelled; cleanup(); return; }
@@ -550,13 +616,19 @@ void VideoGenerator::drawRect(uint8_t* p, int imgW, int imgH,
 }
 
 void VideoGenerator::renderLongImage(std::vector<uint8_t>& pixels) {
+    renderLongImageRegion(pixels, 0, totalHeight_);
+}
+
+void VideoGenerator::renderLongImageRegion(std::vector<uint8_t>& pixels, int regionTop, int regionHeight) {
     int imgW = config_.width;
-    int imgH = totalHeight_;
+    int imgH = regionHeight;  // buffer height = region height
+    // All absolute Y coords are offset by -regionTop before drawing.
+    // setPixel/fillRect/drawRect clip to [0, imgH), so out-of-region elements are ignored.
 
     // Render notes with judgement colors (border only)
     for (size_t i = 0; i < beatmap_.notes.size(); i++) {
         const auto& note = beatmap_.notes[i];
-        int y = imgH - timeToY(note.time) - config_.blockHeight;
+        int absY = totalHeight_ - timeToY(note.time) - config_.blockHeight;
         int x = (int)(note.lane * columnWidth_ + columnWidth_ * 0.1);
         int w = (int)(columnWidth_ * 0.8);
         int h = config_.blockHeight;
@@ -569,12 +641,12 @@ void VideoGenerator::renderLongImage(std::vector<uint8_t>& pixels) {
             // Calculate hold note height based on duration (adjusted for clock rate)
             int64_t duration = note.endTime - note.time;
             int holdHeight = std::max(h, (int)std::ceil(duration / config_.clockRate * timeHeightRatio_));
-            int holdY = imgH - timeToY(note.time);
+            int holdAbsY = totalHeight_ - timeToY(note.time);
             // Draw as single rectangle from bottom to top
-            drawRect(pixels.data(), imgW, imgH, x, holdY - holdHeight, w, holdHeight, config_.stroke, r, g, b);
+            drawRect(pixels.data(), imgW, imgH, x, (holdAbsY - holdHeight) - regionTop, w, holdHeight, config_.stroke, r, g, b);
         } else {
             // Draw border only (no fill)
-            drawRect(pixels.data(), imgW, imgH, x, y, w, h, config_.stroke, r, g, b);
+            drawRect(pixels.data(), imgW, imgH, x, absY - regionTop, w, h, config_.stroke, r, g, b);
         }
     }
     progress_ = 0.15f;
@@ -591,7 +663,7 @@ void VideoGenerator::renderLongImage(std::vector<uint8_t>& pixels) {
 
             if (pressed && !wasPressed) {
                 // Key pressed - find matching note and draw action bar with judgement color
-                int y = imgH - timeToY(frame.time) - config_.actionHeight;
+                int y = totalHeight_ - timeToY(frame.time) - config_.actionHeight - regionTop;
                 int x = (int)(lane * columnWidth_ + columnWidth_ * 0.3);
                 int w = (int)(columnWidth_ * 0.4);
 
@@ -624,7 +696,7 @@ void VideoGenerator::renderLongImage(std::vector<uint8_t>& pixels) {
 
                 // Draw release action bar for hold notes
                 if (isHoldNote) {
-                    int y = imgH - timeToY(endT) - config_.actionHeight;
+                    int y = totalHeight_ - timeToY(endT) - config_.actionHeight - regionTop;
                     int x = (int)(lane * columnWidth_ + columnWidth_ * 0.3);
                     int w = (int)(columnWidth_ * 0.4);
 
@@ -636,8 +708,8 @@ void VideoGenerator::renderLongImage(std::vector<uint8_t>& pixels) {
 
                 // Draw dashed line: always for hold notes, or if showHolding is enabled
                 if (isHoldNote || config_.showHolding) {
-                    int startY = imgH - timeToY(startT);
-                    int endY = imgH - timeToY(endT);
+                    int startY = totalHeight_ - timeToY(startT) - regionTop;
+                    int endY = totalHeight_ - timeToY(endT) - regionTop;
                     int top = std::min(startY, endY);
                     int bot = std::max(startY, endY);
 

@@ -14,7 +14,7 @@ if exist "%VS2022%" (
 )
 
 echo Compiling...
-cl /EHsc /std:c++17 /O2 /utf-8 /wd4819 ^
+cl /EHsc /std:c++17 /O2 /utf-8 /bigobj /wd4819 ^
     /I"src\core" ^
     /I"src\parsers" ^
     /I"src\graphics" ^
@@ -44,7 +44,7 @@ cl /EHsc /std:c++17 /O2 /utf-8 /wd4819 ^
     /LIBPATH:"lib\x64" ^
     SDL3.lib SDL3_ttf.lib bass.lib bass_fx.lib ^
     icuuc.lib icuin.lib ^
-    avcodec.lib avformat.lib avutil.lib swscale.lib ^
+    avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib ^
     shell32.lib Advapi32.lib comdlg32.lib ^
     /SUBSYSTEM:WINDOWS
 

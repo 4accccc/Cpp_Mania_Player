@@ -29,7 +29,14 @@ int64_t MuSynxParser::timeToMs(int64_t musynxTime) {
 }
 
 int MuSynxParser::trackToLane(int track, int keyCount) {
-    if (keyCount == 4) {
+    if (keyCount == 2) {
+        // 2K: tracks 4,6 -> lanes 0,1
+        switch (track) {
+            case 4: return 0;
+            case 6: return 1;
+            default: return -1;
+        }
+    } else if (keyCount == 4) {
         // 4K: tracks 3,4,6,7 -> lanes 0,1,2,3
         switch (track) {
             case 3: return 0;
@@ -49,8 +56,10 @@ int MuSynxParser::trackToLane(int track, int keyCount) {
 }
 
 int MuSynxParser::getKeyCountFromFilename(const std::string& filename) {
-    // Look for "4T" or "6T" in filename
-    if (filename.find("4T") != std::string::npos) {
+    // Look for "2T", "4T" or "6T" in filename
+    if (filename.find("2T") != std::string::npos) {
+        return 2;
+    } else if (filename.find("4T") != std::string::npos) {
         return 4;
     } else if (filename.find("6T") != std::string::npos) {
         return 6;
@@ -75,7 +84,8 @@ bool MuSynxParser::parse(const std::string& path, BeatmapInfo& info) {
 
     // Extract song name from filename (e.g., "silverTown4T_easy.txt" -> "silverTown")
     std::string songName = filename;
-    size_t keyPos = songName.find("4T");
+    size_t keyPos = songName.find("2T");
+    if (keyPos == std::string::npos) keyPos = songName.find("4T");
     if (keyPos == std::string::npos) keyPos = songName.find("6T");
     if (keyPos != std::string::npos) {
         songName = songName.substr(0, keyPos);
@@ -85,7 +95,7 @@ bool MuSynxParser::parse(const std::string& path, BeatmapInfo& info) {
     std::string difficulty = "Normal";
     if (filename.find("_easy") != std::string::npos) difficulty = "Easy";
     else if (filename.find("_hard") != std::string::npos) difficulty = "Hard";
-    else if (filename.find("_inf") != std::string::npos) difficulty = "Inferno";
+    else if (filename.find("_in") != std::string::npos) difficulty = "Inferno";
 
     // Look up song title from database
     static auto songDB = getMuSynxSongDB();

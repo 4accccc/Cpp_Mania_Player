@@ -18,15 +18,17 @@
 - Be-Music Script [*.bms, *.bme, *.bml]
 - DJMAX RESPECT [*.bytes]
 - DJMAX ONLINE [*.pt]
+- EZ2AC FNEX [*.ez]
 - Malody [*.mc]
 - MUSYNX/MUSYNC [*.txt]
 - osu!mania [*.osu] ([EXPERIMENTAL]support standard converted maps)
 - O2Jam [*.ojn]
+- SoundVoltex [*.vox]
 - StepMania [*.sm, *.ssc]
 
 ### Formats planned to support
 
-- EZ2DJ/EZ2ON
+- Virtual Orchestra System
 - More...
 
 ## Tutorial: [How to add songs?](https://github.com/4accccc/Cpp_Mania_Player/wiki/Songs-folder-structure)
@@ -196,6 +198,7 @@
 
 
 ### Mania Player v0.0.6
+
 - 重构歌曲选择界面，加入元数据展示，osu!同款搜索功能
 - 重构音频系统，降低DirectSound音频延迟，加入WASAPI Shared/Exclusive, ASIO 支持
 - 修复处理部分osu!谱面时游戏闪退的问题
@@ -208,6 +211,32 @@
 - 修复 MUSYNX key 音转码过慢的问题
 - 新增 Cinema Mod
 - 新增 StepMania 谱面读取
+
+
+
+### Mania Player v0.0.7a
+
+- 修复大量稳定性问题:
+    - 损坏的config.ini可以阻止游戏运行
+    - 异步加载创建新线程时没有先 join 旧线程
+    - 关闭DT时不会同步关闭NC
+    - 设置界面下拉框无法遮挡后方控件
+    - StepMania 谱面预览时间无效
+    - BMS/O2Jam/... 等谱面的key音被加载了2次
+    - 部分特别大的 BGA 图片可能导致OOM
+    - 部分写的不规范的 BMS 谱面可能导致解析器出现异常
+    - 在 Linux/... 系统中，字体不存在会导致崩溃
+    - 当使用b20220101星数计算逻辑，开启DT时星数计算出错
+    - 死亡时note会瞬移
+    - ...
+- 修复反复暂停时时间异常的问题
+- 修复多K轨道分隔线异常显示的问题
+- 修复音量调节100和50人耳几乎听不出区别的问题
+- 新增暂停后恢复游戏的倒计时
+- 新增11K-18K支持，设置内的Lane Color设置弃用，改为配置文件内手动修改颜色 hex 值
+- 新增 SoundVoltex 谱面读取
+- 新增 EZ2AC FNEX 谱面, key音读取
+- 新增谱面导出为 *.osz 格式
 
 
 
@@ -250,7 +279,7 @@ These are also needed in `lib/x64/`:
 | SDL3 | [GitHub Releases](https://github.com/libsdl-org/SDL/releases) | `SDL3.lib`, `SDL3.dll` |
 | SDL3_ttf | [GitHub Releases](https://github.com/libsdl-org/SDL_ttf/releases) | `SDL3_ttf.lib`, `SDL3_ttf.dll` |
 | ICU | [GitHub Releases](https://github.com/unicode-org/icu/releases) | `icuuc.lib`, `icuin.lib` + DLLs |
-| FFmpeg | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) (shared build) | `avcodec.lib`, `avformat.lib`, `avutil.lib`, `swscale.lib` + DLLs |
+| FFmpeg | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) (shared build) | `avcodec.lib`, `avformat.lib`, `avutil.lib`, `swscale.lib`, `swresample.lib` + DLLs |
 
 ### 2. Build
 
