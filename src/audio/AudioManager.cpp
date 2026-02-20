@@ -116,6 +116,10 @@ void AudioManager::loadAddonDLLs() {
         else
             std::cerr << "BASSASIO: some functions missing" << std::endl;
     }
+
+    // BASSFLAC plugin (adds FLAC format support to BASS_SampleLoad/StreamCreateFile)
+    if (BASS_PluginLoad("bassflac", 0))
+        std::cout << "BASSFLAC loaded" << std::endl;
 }
 
 void AudioManager::unloadAddonDLLs() {

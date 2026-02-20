@@ -16,9 +16,10 @@
 
 - Beatmania IIDX [*.1]
 - Be-Music Script [*.bms, *.bme, *.bml]
-- DJMAX RESPECT [*.bytes]
+- DJMAX RESPECT / DJMAX RESPECT V [*.bytes]
 - DJMAX ONLINE [*.pt]
 - EZ2AC FNEX [*.ez]
+- EZ2ON REBOOT:R [*.ezi]
 - Malody [*.mc]
 - MUSYNX/MUSYNC [*.txt]
 - osu!mania [*.osu] ([EXPERIMENTAL]support standard converted maps)
@@ -53,6 +54,7 @@
 | [BASSmix](https://www.un4seen.com/) | Commercial/Free | Audio mixer (required for WASAPI/ASIO) |
 | [BASSWASAPI](https://www.un4seen.com/) | Commercial/Free | WASAPI output |
 | [BASSASIO](https://www.un4seen.com/) | Commercial/Free | ASIO output |
+| [BASSFLAC](https://www.un4seen.com/) | Commercial/Free | FLAC decoding |
 
 ### Source Libraries (included)
 
@@ -240,6 +242,19 @@
 
 
 
+### Mania Player v0.0.7
+
+- 修复设置界面部分元件显示在滚动时会超出窗口的问题
+- 修复设置界面往下可以无限滚动的问题
+- 修复 DJMAX RESPECT 谱面变速错误处理的问题
+- 修复 DJMAX RESPECT 部分BGM音频不遵守命名规范时无法识别的问题
+- 修复 EZ2ON REBOOT:R 谱面导出的 Flac 音频文件 osu! 无法读取的问题(会转码为wav)
+- 新增 DJMAX RESPECT V 谱面读取支持(谱面文件不公开提供！)
+- 新增 EZ2ON REBOOT:R 谱面，key音读取(谱面文件不公开提供！)
+- 新增 DJMAX RESPECT 谱面导出时支持去除 FX/SIDE note
+
+
+
 ## Building
 
 ### 1. Download Dependencies
@@ -262,6 +277,7 @@ Optional (for low-latency WASAPI/ASIO output):
 | BASSmix | [bassmix24](https://www.un4seen.com/download.php?bassmix24) | `bassmix.h`, `bassmix.lib`, `bassmix.dll` |
 | BASSWASAPI | [basswasapi24](https://www.un4seen.com/download.php?basswasapi24) | `basswasapi.h`, `basswasapi.lib`, `basswasapi.dll` |
 | BASSASIO | [bassasio](https://www.un4seen.com/download.php?bassasio) | `bassasio.h`, `bassasio.lib`, `bassasio.dll` |
+| BASSASIO | [bassflac](https://www.un4seen.com/download.php?bassflac) | `bassflac.h`, `bassflac.lib`, `bassflac.dll` |
 
 Place files as follows:
 ```
@@ -323,7 +339,7 @@ make -j$(nproc)
 
 Output: `build/bin/mania_player`
 
-## macOS
+#### macOS
 
 macOS support is experimental. You'll need to install dependencies via Homebrew or build from source.
 

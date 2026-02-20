@@ -2099,7 +2099,7 @@ void Renderer::renderMenu() {
         SDL_DestroySurface(s);
     }
 
-    const char* version = "Version 0.0.7a";
+    const char* version = "Version 0.0.7";
     s = TTF_RenderText_Blended(font, version, strlen(version), white);
     if (s) {
         SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
@@ -2858,7 +2858,11 @@ bool Renderer::renderTextInput(const char* label, std::string& text, float x, fl
                 scrollOffset = 0;
             }
 
-            // Set clip rect to input box area
+            // Save current clip rect and set input box clip
+            SDL_Rect prevClip;
+            SDL_GetRenderClipRect(renderer, &prevClip);
+            bool clipWasEnabled = SDL_RenderClipEnabled(renderer);
+
             SDL_Rect clipRect = {(int)(x + padding), (int)inputY, (int)contentWidth, (int)h};
             SDL_SetRenderClipRect(renderer, &clipRect);
 
@@ -2882,8 +2886,12 @@ bool Renderer::renderTextInput(const char* label, std::string& text, float x, fl
                 SDL_RenderFillRect(renderer, &cursorRect);
             }
 
-            // Clear clip rect
-            SDL_SetRenderClipRect(renderer, nullptr);
+            // Restore previous clip rect
+            if (clipWasEnabled) {
+                SDL_SetRenderClipRect(renderer, &prevClip);
+            } else {
+                SDL_SetRenderClipRect(renderer, nullptr);
+            }
         }
     }
 

@@ -64,6 +64,16 @@ private:
     // Returns -1 if track should be excluded (analog, side keys)
     static int trackToLane(int trackIdx, DJMaxKeyMode keyMode);
 
-    // Convert tick to milliseconds
+    // Tempo timeline entry for variable-BPM tick-to-ms conversion
+    struct TempoEvent {
+        uint32_t tick;
+        float bpm;
+        double timeMs;  // accumulated time at this tick
+    };
+
+    // Convert tick to milliseconds using tempo timeline
+    static double tickToMsVar(uint32_t tick, const std::vector<TempoEvent>& timeline, uint16_t tpm);
+
+    // Convert tick to milliseconds (constant tps, legacy fallback)
     static int64_t tickToMs(uint32_t tick, float tps);
 };

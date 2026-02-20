@@ -28,7 +28,7 @@ std::string KeySoundManager::removeExtension(const std::string& filename) {
 }
 
 std::string KeySoundManager::findAudioFile(const std::string& baseName) {
-    static const std::vector<std::string> extensions = {".wav", ".ogg", ".mp3", ".ssf"};
+    static const std::vector<std::string> extensions = {".wav", ".ogg", ".mp3", ".flac", ".ssf"};
 
     // Check if baseName is already a full path (contains directory separator)
     if (baseName.find('/') != std::string::npos || baseName.find('\\') != std::string::npos) {

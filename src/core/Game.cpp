@@ -16,9 +16,12 @@
 #include "StepManiaParser.h"
 #include "VoxParser.h"
 #include "EZ2ACParser.h"
+#include "EZ2ONParser.h"
 #include "SDVXSongDB.h"
 #include "IIDXSongDB.h"
 #include "EZ2ACSongDB.h"
+#include "EZ2ONSongDB.h"
+#include "DMRVSongDB.h"
 #include "StarRating.h"
 #include "SongIndex.h"
 #include "OsuMods.h"
@@ -84,6 +87,7 @@ static double getBPMAtTime(const std::vector<TimingPoint>& timingPoints, int64_t
 static double calcOverlapPercent(int noteY, int judgeLineY, int noteHeight, double speedMultiplier = 1.0) {
     // Virtual note height scales with speed, centered on actual note
     int virtualNoteHeight = static_cast<int>(noteHeight * speedMultiplier);
+    if (virtualNoteHeight <= 0) return 0.0;
     int actualNoteCenter = noteY + noteHeight / 2;
     int noteTop = actualNoteCenter - virtualNoteHeight / 2;
     int noteBottom = actualNoteCenter + virtualNoteHeight / 2;
@@ -166,6 +170,25 @@ static std::string formatDifficultyName(const SongEntry& song, int d, int starRa
     if (d >= 0 && d < (int)song.difficulties.size()) {
         const auto& diff = song.difficulties[d];
         diffName = diff.version;
+        // For DJMAX Respect, append difficulty level from DMRVSongDB
+        if (song.source == BeatmapSource::DJMaxRespect) {
+            std::string fname = fs::path(diff.path).stem().string();
+            size_t upos = fname.find('_');
+            std::string nameId = (upos != std::string::npos) ? fname.substr(0, upos) : fname;
+            const auto* dbSong = DMRVSongDB::findByNameId(nameId);
+            if (dbSong) {
+                int diffIdx = 0;
+                if (diff.version == "Hard") diffIdx = 1;
+                else if (diff.version == "Maximum") diffIdx = 2;
+                else if (diff.version == "SC") diffIdx = 3;
+                int level = 0;
+                if (diff.keyCount == 6 || diff.keyCount == 4) level = dbSong->diff4B[diffIdx];
+                else if (diff.keyCount == 7 || diff.keyCount == 5) level = dbSong->diff5B[diffIdx];
+                else if (diff.keyCount == 8) level = dbSong->diff6B[diffIdx];
+                else if (diff.keyCount == 10) level = dbSong->diff8B[diffIdx];
+                if (level > 0) diffName += " " + std::to_string(level);
+            }
+        }
         // Don't show creator for BMS (already included in version)
         if (!diff.creator.empty() && song.source != BeatmapSource::BMS) {
             diffName += " (" + diff.creator + ")";
@@ -219,7 +242,7 @@ Game::Game() : state(GameState::Menu), running(false), musicStarted(false), hasB
                resolutionDropdownExpanded(false), refreshRateDropdownExpanded(false),
                keyCountDropdownExpanded(false),
                starRatingDropdownExpanded(false),
-               settingsScroll(0), settingsDragging(false), settingsDragStartY(0), settingsDragStartScroll(0),
+               settingsScroll(0), settingsContentHeight(0), settingsDragging(false), settingsDragStartY(0), settingsDragStartScroll(0),
                judgeDetailPopup(-1), pauseMenuSelection(0), pauseTime(0),
                pauseFadingOut(false), pauseFadeOutStart(0), pauseAudioOffset(0),
                replayMode(false), currentReplayFrame(0),
@@ -337,7 +360,7 @@ std::string Game::openFileDialog() {
     return FileDialog::openFile(
         "Select Beatmap",
         nullptr,
-        {"*.osu", "*.bytes", "*.ojn", "*.pt", "*.bms", "*.bme", "*.bml", "*.pms", "*.1", "*.mc", "*.txt", "*.sm", "*.ssc", "*.ez"},
+        {"*.osu", "*.bytes", "*.ojn", "*.pt", "*.bms", "*.bme", "*.bml", "*.pms", "*.1", "*.mc", "*.txt", "*.sm", "*.ssc", "*.ez", "*.ezi"},
         "Beatmap Files"
     );
 }
@@ -616,6 +639,57 @@ static std::string generateOsuFile(const BeatmapInfo& info, const std::string& a
     }
 
     return osu.str();
+}
+
+// Create a copy of BeatmapInfo with specified lanes removed and remaining lanes renumbered.
+// Used for DJMAX Respect export variants (e.g. without analog, without side keys).
+static BeatmapInfo filterLanes(const BeatmapInfo& src, const std::vector<int>& removeLanes,
+                                int newKeyCount) {
+    BeatmapInfo filtered = src;
+    filtered.keyCount = newKeyCount;
+
+    // Build lane remap table: old lane -> new lane (-1 = removed)
+    std::vector<int> laneMap(src.keyCount, -1);
+    int newLane = 0;
+    for (int i = 0; i < src.keyCount; i++) {
+        bool removed = false;
+        for (int r : removeLanes) {
+            if (i == r) { removed = true; break; }
+        }
+        if (!removed)
+            laneMap[i] = newLane++;
+    }
+
+    // Filter and remap notes; removed lanes become storyboard samples (keep keysound)
+    filtered.notes.clear();
+    for (const auto& note : src.notes) {
+        if (note.lane >= 0 && note.lane < (int)laneMap.size() && laneMap[note.lane] >= 0) {
+            Note n = note;
+            n.lane = laneMap[note.lane];
+            filtered.notes.push_back(n);
+        } else if (!note.filename.empty()) {
+            // Convert removed-lane note to storyboard sample so keysound still plays
+            StoryboardSample ss;
+            ss.time = note.time;
+            ss.filename = note.filename;
+            ss.volume = note.volume;
+            ss.layer = 0;
+            filtered.storyboardSamples.push_back(ss);
+        }
+    }
+
+    // Re-sort storyboard samples after adding converted notes
+    std::sort(filtered.storyboardSamples.begin(), filtered.storyboardSamples.end(),
+              [](const StoryboardSample& a, const StoryboardSample& b) {
+                  return a.time < b.time;
+              });
+    filtered.totalObjectCount = (int)filtered.notes.size();
+    filtered.endTimeObjectCount = 0;
+    for (const auto& n : filtered.notes) {
+        if (n.isHold) filtered.endTimeObjectCount++;
+    }
+
+    return filtered;
 }
 
 // Convert EZ2AC SSF format (16-byte header + raw PCM) to WAV in memory
@@ -1211,6 +1285,8 @@ void Game::exportBeatmapAsync() {
                     }
                 }
             }
+        } else if (ext == ".ezi") {
+            parseOk = EZ2ONParser::parse(actualPath, info);
         } else if (ext == ".1") {
             // IIDX: parse chart with difficulty index
             int iidxDiff = (subDiffIdx >= 0) ? subDiffIdx : IIDXParser::SP_ANOTHER;
@@ -1444,9 +1520,14 @@ void Game::exportBeatmapAsync() {
                 if (fs::exists(tryPath)) { srcPath = tryPath.string(); break; }
                 // Try common extensions
                 std::string stem = fs::path(fn).stem().string();
-                for (const char* tryExt : {".wav", ".ogg", ".mp3"}) {
+                for (const char* tryExt : {".wav", ".ogg", ".mp3", ".flac"}) {
                     tryPath = dir / (stem + tryExt);
-                    if (fs::exists(tryPath)) { srcPath = tryPath.string(); fn = stem + tryExt; break; }
+                    if (fs::exists(tryPath)) {
+                        srcPath = tryPath.string();
+                        // Keep original fn for .flac (export as .wav name)
+                        if (std::string(tryExt) != ".flac") fn = stem + tryExt;
+                        break;
+                    }
                 }
             }
             keysoundFiles[fn] = srcPath;
@@ -1472,9 +1553,13 @@ void Game::exportBeatmapAsync() {
                 tryPath = dir / fn;
                 if (fs::exists(tryPath)) { srcPath = tryPath.string(); break; }
                 std::string stem = fs::path(fn).stem().string();
-                for (const char* tryExt : {".wav", ".ogg", ".mp3"}) {
+                for (const char* tryExt : {".wav", ".ogg", ".mp3", ".flac"}) {
                     tryPath = dir / (stem + tryExt);
-                    if (fs::exists(tryPath)) { srcPath = tryPath.string(); fn = stem + tryExt; break; }
+                    if (fs::exists(tryPath)) {
+                        srcPath = tryPath.string();
+                        if (std::string(tryExt) != ".flac") fn = stem + tryExt;
+                        break;
+                    }
                 }
             }
             keysoundFiles[fn] = srcPath;
@@ -1483,6 +1568,55 @@ void Game::exportBeatmapAsync() {
         // Generate .osu content
         std::string osuContent = generateOsuFile(info, audioRelName);
         std::string diffName = info.version;
+        // For DJMAX Respect, append difficulty level from DMRVSongDB
+        if (song.source == BeatmapSource::DJMaxRespect) {
+            std::string fname = fs::path(diff.path).stem().string();
+            size_t upos = fname.find('_');
+            std::string nameId = (upos != std::string::npos) ? fname.substr(0, upos) : fname;
+            const auto* dbSong = DMRVSongDB::findByNameId(nameId);
+            if (dbSong) {
+                int diffIdx = 0;
+                if (diffName == "HD" || diffName == "Hard") diffIdx = 1;
+                else if (diffName == "MX" || diffName == "Maximum") diffIdx = 2;
+                else if (diffName == "SC") diffIdx = 3;
+                int level = 0;
+                int kc = info.keyCount;
+                if (kc == 6 || kc == 4) level = dbSong->diff4B[diffIdx];
+                else if (kc == 7 || kc == 5) level = dbSong->diff5B[diffIdx];
+                else if (kc == 8) level = dbSong->diff6B[diffIdx];
+                else if (kc == 10) level = dbSong->diff8B[diffIdx];
+                if (level > 0) diffName += " " + std::to_string(level);
+            }
+        }
+        // For EZ2ON, append difficulty level from EZ2ONSongDB
+        if (song.source == BeatmapSource::EZ2ON) {
+            std::string ez2onFolder = fs::path(diff.path).parent_path().filename().string();
+            const EZ2ONSongEntry* ez2onSong = ez2onFindByFolderName(ez2onFolder);
+            if (ez2onSong) {
+                int dIdx = -1;
+                if (diffName.find("SHD") != std::string::npos) dIdx = 3;
+                else if (diffName.find("HD") != std::string::npos) dIdx = 2;
+                else if (diffName.find("NM") != std::string::npos) dIdx = 1;
+                else if (diffName.find("EZ") != std::string::npos) dIdx = 0;
+                if (dIdx < 0)
+                    dIdx = ez2onMatchDifficulty(ez2onSong, info.keyCount, (int)info.notes.size());
+                if (dIdx >= 0) {
+                    if (diffName.find("EZ") == std::string::npos &&
+                        diffName.find("NM") == std::string::npos &&
+                        diffName.find("HD") == std::string::npos &&
+                        diffName.find("SHD") == std::string::npos) {
+                        static const char* dn[] = {"EZ", "NM", "HD", "SHD"};
+                        diffName += " " + std::string(dn[dIdx]);
+                    }
+                    int slot = ez2onDiffSlot(info.keyCount, dIdx);
+                    if (slot >= 0 && ez2onSong->levels[slot] > 0) {
+                        char lvBuf[16];
+                        snprintf(lvBuf, sizeof(lvBuf), " Lv.%d", ez2onSong->levels[slot] / 10);
+                        diffName += lvBuf;
+                    }
+                }
+            }
+        }
         // Always include key count to distinguish 5K/7K variants
         std::string osuFilename = sanitizeFilename(artist + " - " + title
             + " (" + info.creator + ") [" + diffName + " " + std::to_string(info.keyCount) + "K]") + ".osu";
@@ -1513,6 +1647,58 @@ void Game::exportBeatmapAsync() {
                 if (v.empty()) { std::cout << "  first missing: " << k << std::endl; break; }
             }
         }
+
+        // Generate lane-filtered variants for DJMAX Respect
+        // 4B/5B/6B: withoutANALOG (remove analog_L + analog_R)
+        // 8B: withoutANALOG, withoutSIDE, withoutANALOG/SIDE
+        if (song.source == BeatmapSource::DJMaxRespect) {
+            struct LaneVariant {
+                const char* suffix;
+                std::vector<int> removeLanes;
+                int newKeyCount;
+            };
+            std::vector<LaneVariant> variants;
+            int kc = info.keyCount;
+
+            if (kc == 6) { // 4B: analog_L=0, keys=1-4, analog_R=5
+                variants.push_back({"_withoutANALOG", {0, 5}, 4});
+            } else if (kc == 7) { // 5B: analog_L=0, keys=1-5, analog_R=6
+                variants.push_back({"_withoutANALOG", {0, 6}, 5});
+            } else if (kc == 8) { // 6B: analog_L=0, keys=1-6, analog_R=7
+                variants.push_back({"_withoutANALOG", {0, 7}, 6});
+            } else if (kc == 10) { // 8B: analog_L=0, L1=1, keys=2-7, R1=8, analog_R=9
+                variants.push_back({"_withoutANALOG", {0, 9}, 8});
+                variants.push_back({"_withoutSIDE", {1, 8}, 8});
+                variants.push_back({"_withoutANALOG_SIDE", {0, 1, 8, 9}, 6});
+            }
+
+            for (const auto& var : variants) {
+                BeatmapInfo varInfo = filterLanes(info, var.removeLanes, var.newKeyCount);
+                varInfo.version = info.version + var.suffix;
+
+                std::string varContent = generateOsuFile(varInfo, audioRelName);
+                std::string varDiffName = diffName + var.suffix;
+                std::string varFilename = sanitizeFilename(artist + " - " + title
+                    + " (" + info.creator + ") [" + varDiffName + " "
+                    + std::to_string(var.newKeyCount) + "K]") + ".osu";
+
+                if (addedNames.count(varFilename)) {
+                    varFilename = sanitizeFilename(artist + " - " + title
+                        + " (" + info.creator + ") [" + varDiffName + " "
+                        + std::to_string(var.newKeyCount) + "K " + std::to_string(di) + "]") + ".osu";
+                }
+
+                if (!addedNames.count(varFilename)) {
+                    ZipEntry ve;
+                    ve.name = varFilename;
+                    ve.data.assign(varContent.begin(), varContent.end());
+                    ve.crc = calcCRC32(ve.data.data(), ve.data.size());
+                    zipEntries.push_back(std::move(ve));
+                    addedNames.insert(varFilename);
+                    std::cout << "Export: " << varFilename << " (" << varInfo.notes.size() << " notes)" << std::endl;
+                }
+            }
+        }
     }
 
     if (zipEntries.empty()) {
@@ -1532,10 +1718,22 @@ void Game::exportBeatmapAsync() {
         if (!song.audioPath.empty() && fs::exists(song.audioPath)) {
             audioSrc = song.audioPath;
         } else if (!song.difficulties.empty()) {
-            // Try to find audio relative to first difficulty
+            // Try to find audio relative to first difficulty (with extension fallback)
             fs::path diffDir = fs::path(song.difficulties[0].path).parent_path();
             fs::path tryPath = diffDir / audioRelName;
-            if (fs::exists(tryPath)) audioSrc = tryPath.string();
+            if (fs::exists(tryPath)) {
+                audioSrc = tryPath.string();
+            } else {
+                std::string stem = fs::path(audioRelName).stem().string();
+                for (const char* ext : {".ogg", ".wav", ".mp3"}) {
+                    tryPath = diffDir / (stem + ext);
+                    if (fs::exists(tryPath)) {
+                        audioSrc = tryPath.string();
+                        audioRelName = stem + ext;
+                        break;
+                    }
+                }
+            }
         }
         if (!audioSrc.empty()) {
             std::ifstream af(audioSrc, std::ios::binary);
@@ -1552,38 +1750,6 @@ void Game::exportBeatmapAsync() {
         }
     }
 
-    // Generate silent audio for keysound-only maps (osu! requires an audio file)
-    if (!audioRelName.empty() && !addedNames.count(audioRelName)) {
-        // 0.1s silence, 44100Hz stereo 16-bit PCM WAV
-        const uint32_t sampleRate = 44100;
-        const uint32_t numSamples = sampleRate / 10;  // 0.1 seconds
-        const uint32_t dataSize = numSamples * 2 * 2;  // stereo 16-bit
-        const uint32_t fileSize = 36 + dataSize;
-        std::vector<uint8_t> wav(44 + dataSize, 0);
-        memcpy(&wav[0], "RIFF", 4);
-        memcpy(&wav[4], &fileSize, 4);
-        memcpy(&wav[8], "WAVE", 4);
-        memcpy(&wav[12], "fmt ", 4);
-        uint32_t fmtSize = 16; memcpy(&wav[16], &fmtSize, 4);
-        uint16_t audioFmt = 1; memcpy(&wav[20], &audioFmt, 2);
-        uint16_t channels = 2; memcpy(&wav[22], &channels, 2);
-        memcpy(&wav[24], &sampleRate, 4);
-        uint32_t byteRate = sampleRate * 4; memcpy(&wav[28], &byteRate, 4);
-        uint16_t blockAlign = 4; memcpy(&wav[32], &blockAlign, 2);
-        uint16_t bitsPerSample = 16; memcpy(&wav[34], &bitsPerSample, 2);
-        memcpy(&wav[36], "data", 4);
-        memcpy(&wav[40], &dataSize, 4);
-        // PCM data is already zeroed (silence)
-
-        ZipEntry ae;
-        ae.name = audioRelName;  // Keep original name so .osu references match
-        ae.data = std::move(wav);
-        ae.crc = calcCRC32(ae.data.data(), ae.data.size());
-        zipEntries.push_back(std::move(ae));
-        addedNames.insert(audioRelName);
-        std::cout << "Export: generated silent audio (keysound-only map)" << std::endl;
-    }
-
     // Add keysound files (skip those already added as zip entries, e.g. O2Jam)
     for (const auto& [fn, srcPath] : keysoundFiles) {
         if (srcPath.empty()) continue;  // Already added or not found
@@ -1592,6 +1758,15 @@ void Game::exportBeatmapAsync() {
         if (!kf) continue;
         std::vector<uint8_t> data((std::istreambuf_iterator<char>(kf)),
                                    std::istreambuf_iterator<char>());
+        kf.close();
+
+        // Transcode FLAC to WAV PCM (FLAC files use .wav name in export)
+        if (data.size() >= 4 && data[0] == 'f' && data[1] == 'L' &&
+            data[2] == 'a' && data[3] == 'C') {
+            auto wav = transcodeToWAV(data.data(), data.size());
+            if (!wav.empty()) data = std::move(wav);
+        }
+
         ZipEntry ke;
         ke.name = fn;
         ke.data = std::move(data);
@@ -1934,6 +2109,7 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
     bool isStepMania = StepManiaParser::isStepManiaFile(actualPath);
     bool isVox = actualPath.size() > 4 && actualPath.substr(actualPath.size() - 4) == ".vox";
     bool isEZ2AC = EZ2ACParser::isEZ2ACFile(actualPath);
+    bool isEZ2ON = EZ2ONParser::isEZ2ONFile(actualPath);
     std::string ptAudioDir;  // For PT files with PAK extraction
 
     if (!skipParsing) {
@@ -2155,6 +2331,12 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
             return false;
         }
         std::cout << "Loaded EZ2AC chart: " << beatmap.keyCount << "K" << std::endl;
+    } else if (isEZ2ON) {
+        if (!EZ2ONParser::parse(actualPath, beatmap)) {
+            std::cerr << "Failed to parse EZ2ON chart" << std::endl;
+            return false;
+        }
+        std::cout << "Loaded EZ2ON chart: " << beatmap.keyCount << "K" << std::endl;
     } else {
         if (!OsuParser::parse(beatmapPath, beatmap)) {
             std::cerr << "Failed to parse beatmap" << std::endl;
@@ -2426,6 +2608,17 @@ bool Game::loadBeatmap(const std::string& path, bool skipParsing) {
     } else {
         std::filesystem::path fullAudioPath = osuPath.parent_path() / beatmap.audioFilename;
         audioPath = fullAudioPath.u8string();
+        // Fallback: try alternative audio extensions (.wav -> .ogg -> .mp3)
+        if (!std::filesystem::exists(audioPath)) {
+            std::filesystem::path stem = fullAudioPath.parent_path() / fullAudioPath.stem();
+            for (const auto& ext : {".wav", ".ogg", ".mp3"}) {
+                std::string alt = stem.u8string() + ext;
+                if (std::filesystem::exists(alt)) {
+                    audioPath = alt;
+                    break;
+                }
+            }
+        }
     }
 
     // Load music (BASS handles real-time tempo change)
@@ -2621,6 +2814,7 @@ void Game::loadBeatmapAsync(const std::string& path) {
     bool isStepMania = StepManiaParser::isStepManiaFile(actualPath);
     bool isVox = actualPath.size() > 4 && actualPath.substr(actualPath.size() - 4) == ".vox";
     bool isEZ2AC = EZ2ACParser::isEZ2ACFile(actualPath);
+    bool isEZ2ON = EZ2ONParser::isEZ2ONFile(actualPath);
     std::string ptAudioDir;
 
     loadingProgress = 0.05f;
@@ -2671,6 +2865,9 @@ void Game::loadBeatmapAsync(const std::string& path) {
     } else if (isEZ2AC) {
         SET_STATUS("Parsing EZ2AC chart...");
         parseSuccess = EZ2ACParser::parse(actualPath, beatmap);
+    } else if (isEZ2ON) {
+        SET_STATUS("Parsing EZ2ON chart...");
+        parseSuccess = EZ2ONParser::parse(actualPath, beatmap);
     } else {
         SET_STATUS("Parsing osu! chart...");
         parseSuccess = OsuParser::parse(path, beatmap);
@@ -3267,6 +3464,9 @@ void Game::handleInput() {
                     mouseY >= contentY && mouseY <= contentY + contentH) {
                     settingsScroll -= e.wheel.y * 40;
                     if (settingsScroll < 0) settingsScroll = 0;
+                    float maxScroll = settingsContentHeight - contentH;
+                    if (maxScroll < 0) maxScroll = 0;
+                    if (settingsScroll > maxScroll) settingsScroll = maxScroll;
                 }
             }
         }
@@ -4059,9 +4259,23 @@ void Game::update() {
         }
     }
 
+    // Helper: check if a note/tail has timed out (past judge line with 0 overlap in O2Jam, or past bad window otherwise)
+    auto hasTimedOut = [&](int64_t noteTime) -> bool {
+        if (noteTime >= currentTime) return false;
+        if (settings.judgeMode == JudgementMode::O2Jam) {
+            double hiSpeed = settings.scrollSpeed / 3.657 * clockRate;
+            int noteY = renderer.getNoteY(noteTime, currentTime, settings.scrollSpeed, baseBPM,
+                                           settings.bpmScaleMode, beatmap.timingPoints,
+                                           settings.ignoreSV, clockRate);
+            int judgeLineY = renderer.getJudgeLineY();
+            return calcOverlapPercent(noteY, judgeLineY, Renderer::NOTE_HEIGHT, hiSpeed) <= 0.0;
+        }
+        return noteTime < currentTime - judgementSystem.getBadWindow();
+    };
+
     for (auto& note : beatmap.notes) {
         if (note.isFakeNote) continue;  // Skip fake notes - visual only
-        if (note.state == NoteState::Waiting && note.time < currentTime - judgementSystem.getBadWindow()) {
+        if (note.state == NoteState::Waiting && hasTimedOut(note.time)) {
             if (note.isHold) {
                 // Hold note head missed
                 note.state = NoteState::Holding;
@@ -4099,7 +4313,7 @@ void Game::update() {
                 }
             }
             // Check if hold note tail timed out
-            if (note.endTime < currentTime - judgementSystem.getBadWindow()) {
+            if (hasTimedOut(note.endTime)) {
                 note.state = NoteState::Missed;
                 // Record miss when tail times out (whole hold note counts as 1 miss)
                 processJudgement(Judgement::Miss, note.lane);
@@ -4109,7 +4323,7 @@ void Game::update() {
         }
         // Released hold notes - no ticks, but check for timeout
         if (note.state == NoteState::Released && note.isHold) {
-            if (note.endTime < currentTime - judgementSystem.getBadWindow()) {
+            if (hasTimedOut(note.endTime)) {
                 note.state = NoteState::Missed;
                 processJudgement(Judgement::Miss, note.lane);
                 updateLaneNextNoteIndex(laneNextNoteIndex, beatmap.notes, note.lane,
@@ -4445,6 +4659,7 @@ void Game::render() {
                 else if (song.source == BeatmapSource::StepMania) sourceLabel = "StepMania";
                 else if (song.source == BeatmapSource::SDVX) sourceLabel = "SDVX";
                 else if (song.source == BeatmapSource::EZ2AC) sourceLabel = "EZ2AC";
+                else if (song.source == BeatmapSource::EZ2ON) sourceLabel = "EZ2ON";
                 renderer.renderTextRight(sourceLabel, 1280 - 20, y + 10);
             }
 
@@ -5197,6 +5412,8 @@ void Game::render() {
                         parseSuccess = VoxParser::parse(actualPath, videoBeatmap);
                     } else if (ext == ".ez") {
                         parseSuccess = EZ2ACParser::parse(actualPath, videoBeatmap);
+                    } else if (ext == ".ezi") {
+                        parseSuccess = EZ2ONParser::parse(actualPath, videoBeatmap);
                     }
 
                     if (parseSuccess) {
@@ -5521,6 +5738,7 @@ void Game::render() {
             char statusStr[64];
             snprintf(statusStr, sizeof(statusStr), "Active: %s", modeNames[(int)audio.getOutputMode()]);
             renderer.renderLabel(statusStr, contentX, row5Y);
+            settingsContentHeight = 300;
         }
         else if (settingsCategory == SettingsCategory::Input) {
             // Key count dropdown
@@ -5584,6 +5802,7 @@ void Game::render() {
                     settings.setDefaultColors(8);
                 }
             }
+            settingsContentHeight = 430;
         }
         else if (settingsCategory == SettingsCategory::Graphics) {
             const char* resolutions[] = {"1280x720", "1920x1080", "2560x1440"};
@@ -5707,6 +5926,7 @@ void Game::render() {
             renderer.renderLabel("Background Dim", contentX, row6Y);
             settings.backgroundDim = renderer.renderSliderWithValue(contentX + 150, row6Y, 200,
                 settings.backgroundDim, 0, 100, mouseX, mouseY, mouseDown);
+            settingsContentHeight = 440;
         }
         else if (settingsCategory == SettingsCategory::Judgement) {
             const char* judgeModes[] = {"Beatmap OD", "Custom OD", "Custom Windows", "O2Jam"};
@@ -5770,6 +5990,7 @@ void Game::render() {
             int scaleInt = (int)(settings.hitErrorBarScale * 100);
             scaleInt = renderer.renderSliderWithFloatValue(contentX + 150, errorBarY, 150, scaleInt, 50, 300, 100.0f, mouseX, mouseY, mouseDown);
             settings.hitErrorBarScale = scaleInt / 100.0f;
+            settingsContentHeight = 380;
         }
         else if (settingsCategory == SettingsCategory::Modifiers) {
             renderer.renderLabel("Game Modifiers", contentX, scrolledY);
@@ -5845,6 +6066,7 @@ void Game::render() {
                 }
             }
             renderer.renderText("0.75x speed, 0.5x score", contentX + 20, scrolledY + 550);
+            settingsContentHeight = 570;
         }
         else if (settingsCategory == SettingsCategory::Misc) {
             renderer.renderLabel("Hold Note Judgement", contentX, scrolledY);
@@ -5912,6 +6134,7 @@ void Game::render() {
             const char* starVersions[] = {"b20260101", "b20220101"};
             settings.starRatingVersion = renderer.renderDropdown(nullptr, starVersions, 2,
                 settings.starRatingVersion, contentX, starY + 30, 150, mouseX, mouseY, mouseClicked, starRatingDropdownExpanded);
+            settingsContentHeight = 490;
         }
 
         // Reset clip rect before rendering Close button
@@ -6443,8 +6666,22 @@ void Game::onKeyRelease(int lane, int64_t atTime) {
         double tailError = rawTailError;
 
         // Check if release is within tail judgement window
-        double tailWindow = judgementSystem.getBadWindow();
-        if (rawTailError <= tailWindow) {
+        // O2Jam: use overlap instead of fixed time window
+        bool inTailWindow;
+        if (settings.judgeMode == JudgementMode::O2Jam) {
+            double hiSpeed = settings.scrollSpeed / 3.657 * clockRate;
+            int tailNoteY = renderer.getNoteY(note.endTime, currentTime, settings.scrollSpeed, baseBPM,
+                                               settings.bpmScaleMode, beatmap.timingPoints,
+                                               settings.ignoreSV, clockRate);
+            int judgeLineY = renderer.getJudgeLineY();
+            double tailOverlap = calcOverlapPercent(tailNoteY, judgeLineY, Renderer::NOTE_HEIGHT, hiSpeed);
+            inTailWindow = (tailOverlap > 0.0);
+        } else {
+            double tailWindow = judgementSystem.getBadWindow();
+            inTailWindow = (rawTailError <= tailWindow);
+        }
+
+        if (inTailWindow) {
             // If head was not hit, release in tail window -> Miss
             if (!note.headHit) {
                 note.state = NoteState::Missed;
@@ -6558,7 +6795,9 @@ void Game::onKeyRelease(int lane, int64_t atTime) {
             // Call processJudgement to update combo and score
             processJudgement(j, lane);
             hitErrors.push_back({(int64_t)SDL_GetTicks(), currentTime - note.endTime});
-        } else if (currentTime < note.endTime - judgementSystem.getBadWindow()) {
+        } else if (settings.judgeMode == JudgementMode::O2Jam
+                   ? (currentTime < note.endTime)
+                   : (currentTime < note.endTime - judgementSystem.getBadWindow())) {
             // Released early (mid-hold) - process ticks up to current time first
             if (note.nextTickTime != INT64_MAX) {
                 while (note.nextTickTime + 100 <= currentTime) {
@@ -6834,6 +7073,7 @@ static const char* sourceToString(BeatmapSource src) {
         case BeatmapSource::StepMania: return "StepMania";
         case BeatmapSource::SDVX: return "Sound Voltex";
         case BeatmapSource::EZ2AC: return "EZ2AC";
+        case BeatmapSource::EZ2ON: return "EZ2ON REBOOT:R";
         default: return "";
     }
 }
@@ -7206,7 +7446,7 @@ void Game::scanSongsFolder() {
                 if (ext == ".osu" || ext == ".sm" || ext == ".ssc" ||
                     ext == ".bms" || ext == ".bme" || ext == ".bml" || ext == ".pms" ||
                     ext == ".ojn" || ext == ".pt" || ext == ".bytes" ||
-                    ext == ".mc" || ext == ".1" || ext == ".vox" || ext == ".ez") {
+                    ext == ".mc" || ext == ".1" || ext == ".vox" || ext == ".ez" || ext == ".ezi") {
                     return true;
                 }
                 // MUSYNX .txt files
@@ -7734,6 +7974,7 @@ void Game::scanSongsFolder() {
                 // Calculate star ratings for all versions
                 BeatmapInfo tempInfo;
                 if (DJMaxParser::parse(diff.path, tempInfo)) {
+                    diff.keyCount = tempInfo.keyCount;  // Use parser's key count (includes analog tracks)
                     diff.hash = OsuParser::calculateMD5(diff.path);  // Hash for replay matching
                     diff.starRatings[0] = calculateStarRating(tempInfo.notes, diff.keyCount,
                         StarRatingVersion::OsuStable_b20260101);
@@ -8279,6 +8520,64 @@ void Game::scanSongsFolder() {
 
                 song.beatmapFiles.push_back(diff.path);
                 song.difficulties.push_back(diff);
+            } else if (ext == ".ezi") {
+                // EZ2ON REBOOT:R chart
+                if (!EZ2ONParser::isEZ2ONFile(file.path().string()))
+                    continue;
+
+                song.source = BeatmapSource::EZ2ON;
+
+                DifficultyInfo diff;
+                diff.path = file.path().string();
+                diff.hash = OsuParser::calculateMD5(diff.path);
+
+                BeatmapInfo tempInfo;
+                if (EZ2ONParser::parse(diff.path, tempInfo)) {
+                    diff.keyCount = tempInfo.keyCount;
+                    diff.version = tempInfo.version;
+                    diff.creator = tempInfo.creator;
+                    diff.starRatings[0] = calculateStarRating(tempInfo.notes, diff.keyCount,
+                        StarRatingVersion::OsuStable_b20260101);
+                    diff.starRatings[1] = calculateStarRating(tempInfo.notes, diff.keyCount,
+                        StarRatingVersion::OsuStable_b20220101);
+                    extractDiffMetadata(diff, tempInfo);
+
+                    // Look up EZ2ON SongDB for difficulty level
+                    std::string ez2onFolder = fs::path(diff.path).parent_path().filename().string();
+                    const EZ2ONSongEntry* ez2onSong = ez2onFindByFolderName(ez2onFolder);
+                    if (ez2onSong) {
+                        // Determine difficulty index: first try from version string, then by note count
+                        int diffIdx = -1;
+                        if (diff.version.find("SHD") != std::string::npos) diffIdx = 3;
+                        else if (diff.version.find("HD") != std::string::npos) diffIdx = 2;
+                        else if (diff.version.find("NM") != std::string::npos) diffIdx = 1;
+                        else if (diff.version.find("EZ") != std::string::npos) diffIdx = 0;
+
+                        if (diffIdx < 0) {
+                            // Fallback: match by note count
+                            diffIdx = ez2onMatchDifficulty(ez2onSong, diff.keyCount,
+                                                           (int)tempInfo.notes.size());
+                            if (diffIdx >= 0) {
+                                static const char* diffNames[] = {"EZ", "NM", "HD", "SHD"};
+                                diff.version += " " + std::string(diffNames[diffIdx]);
+                            }
+                        }
+
+                        if (diffIdx >= 0) {
+                            int slot = ez2onDiffSlot(diff.keyCount, diffIdx);
+                            if (slot >= 0 && ez2onSong->levels[slot] > 0) {
+                                char lvBuf[16];
+                                snprintf(lvBuf, sizeof(lvBuf), " Lv.%d", ez2onSong->levels[slot] / 10);
+                                diff.version += lvBuf;
+                            }
+                        }
+
+                        diff.creator = ez2onSong->composer;
+                    }
+                }
+
+                song.beatmapFiles.push_back(diff.path);
+                song.difficulties.push_back(diff);
             }
         }
 
@@ -8377,6 +8676,14 @@ void Game::scanSongsFolder() {
             if (parsed) {
                 song.title = info.title;
                 song.artist = info.artist;
+                // Look up DMRVSongDB for proper display title/artist
+                if (song.source == BeatmapSource::DJMaxRespect) {
+                    const auto* dbSong = DMRVSongDB::findByNameId(info.title);
+                    if (dbSong) {
+                        song.title = dbSong->title;
+                        song.artist = dbSong->artist;
+                    }
+                }
             }
             // DJMAX: preview audio is "songname.wav" (without "0-" prefix)
             // Extract song name from filename (e.g., "songname_4b_nm.bytes" -> "songname")
@@ -8385,13 +8692,16 @@ void Game::scanSongsFolder() {
             size_t underscorePos = chartName.find('_');
             if (underscorePos != std::string::npos) {
                 std::string songName = chartName.substr(0, underscorePos);
-                // Look for songname.wav or songname.ogg
-                for (const auto& ext : {".wav", ".ogg", ".mp3"}) {
-                    fs::path audioPath = folderPath / (songName + ext);
-                    if (fs::exists(audioPath)) {
-                        song.audioPath = audioPath.string();
-                        break;
+                // Look for songname.wav/ogg/mp3, fallback to 0-songname.wav/ogg/mp3
+                for (const auto& prefix : {"", "0-"}) {
+                    for (const auto& ext : {".wav", ".ogg", ".mp3"}) {
+                        fs::path audioPath = folderPath / (prefix + songName + ext);
+                        if (fs::exists(audioPath)) {
+                            song.audioPath = audioPath.string();
+                            break;
+                        }
                     }
+                    if (!song.audioPath.empty()) break;
                 }
             }
             song.previewTime = -1;  // 40% position
@@ -8541,6 +8851,28 @@ void Game::scanSongsFolder() {
             // Look for background image in song folder
             fs::path ezDir = fs::path(firstFile).parent_path();
             for (const auto& f : fs::directory_iterator(ezDir)) {
+                if (!f.is_regular_file()) continue;
+                std::string ext = f.path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if (ext == ".jpg" || ext == ".png" || ext == ".jpeg" || ext == ".bmp") {
+                    song.backgroundPath = f.path().string();
+                    break;
+                }
+            }
+            song.previewTime = -1;
+        } else if (song.source == BeatmapSource::EZ2ON) {
+            // Look up EZ2ON SongDB for proper display title/artist
+            const EZ2ONSongEntry* ez2onSong = ez2onFindByFolderName(song.folderName);
+            if (ez2onSong) {
+                song.title = ez2onSong->displayName;
+                song.artist = ez2onSong->composer;
+            } else {
+                song.title = song.folderName;
+                song.artist = "EZ2ON";
+            }
+            // Look for background image
+            fs::path ez2onDir = fs::path(firstFile).parent_path();
+            for (const auto& f : fs::directory_iterator(ez2onDir)) {
                 if (!f.is_regular_file()) continue;
                 std::string ext = f.path().extension().string();
                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);

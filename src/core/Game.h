@@ -70,7 +70,8 @@ enum class BeatmapSource {
     IIDX,          // beatmania IIDX (.1 files)
     StepMania,     // StepMania (.sm/.ssc files)
     SDVX,          // Sound Voltex (.vox files)
-    EZ2AC          // EZ2AC (.ez files)
+    EZ2AC,         // EZ2AC (.ez files)
+    EZ2ON          // EZ2ON REBOOT:R (.ezi files)
 };
 
 // Difficulty info for song select
@@ -256,6 +257,7 @@ private:
     bool keyCountDropdownExpanded;  // for key count selection
     bool starRatingDropdownExpanded;  // for star rating version selection
     float settingsScroll;  // Scroll offset for settings panel
+    float settingsContentHeight;  // Total content height for current settings category
     bool settingsDragging;  // Mouse drag scrolling for settings
     int settingsDragStartY;
     float settingsDragStartScroll;
